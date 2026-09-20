@@ -9,9 +9,8 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
 console.log('🔑 Webhook URL:', DISCORD_WEBHOOK_URL ? '✅ Đã cấu hình' : '❌ THIẾU URL!');
 
-// ===== LƯU TRẠNG THÁI MỖI NHÂN VIÊN =====
-// true = lần cuối là Vào → lần tiếp theo là Ra
-// false = lần cuối là Ra → lần tiếp theo là Vào
+// ===== LƯU TRẠNG THÁI =====
+// lastStatus[maNV] = { date: '2026-09-20', isCheckin: true/false }
 const lastStatus = {};
 
 // ===== DANH SÁCH NHÂN VIÊN =====
@@ -20,6 +19,19 @@ const employeeNames = {
   'EMP000149': 'Nguyễn Thị Huyền',
   // Thêm nhân viên khác...
 };
+
+// ===== KIỂM TRA SAU 7:30 SÁNG KHÔNG =====
+function isAfterResetTime() {
+  const now = new Date();
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+  // Trả về true nếu >= 7:30
+  return hours > 7 || (hours === 7 && minutes >= 30);
+}
+
+function getToday() {
+  return new Date().toISOString().split('T')[0]; // '2026-09-20'
+}
 
 // ===== GỬI TIN DISCORD =====
 async function sendDiscord(embed) {
@@ -66,25 +78,37 @@ app.post('/webhook/dahahi', async (req, res) => {
     const code = p.EmployeeCode || p.FacePersonId;
     const empName = p.EmployeeName || employeeNames[code] || `Mã: ${code}`;
     const time = p.CheckinTime || new Date().toLocaleString('vi-VN');
+    const today = getToday();
+    const afterReset = isAfterResetTime();
 
     if (!code) {
       console.log('⚠️ KHÔNG TÌM THẤY MÃ NHÂN VIÊN!');
       return res.status(200).json({ ok: false, note: 'Thiếu mã nhân viên' });
     }
 
-    // === TỰ XÁC ĐỊNH VÀO / RA THEO LẦN CHẤM ===
-    // Chưa có bản ghi → mặc định Vào ca
-    if (lastStatus[code] === undefined) {
-      lastStatus[code] = true;
+    // === KIỂM TRA RESET ===
+    const prev = lastStatus[code];
+    let isCheckin;
+
+    if (afterReset && (!prev || prev.date !== today)) {
+      // Sau 7:30 sáng + ngày mới → BẮT ĐẦU TỪ VÀO CA
+      isCheckin = true;
+      console.log(`🌅 Sau 7:30 sáng / Ngày mới → Reset về Vào ca`);
+    } else if (!afterReset && prev && prev.date === today) {
+      // Trước 7:30 + cùng ngày → Tiếp tục luân phiên
+      isCheckin = !prev.isCheckin;
+      console.log(`🌙 Trước 7:30 sáng → Tiếp tục: ${prev.isCheckin ? 'Vào' : 'Ra'} → ${isCheckin ? 'Vào' : 'Ra'}`);
+    } else {
+      // Lần đầu / trước 7:30 chưa có dữ liệu → Bắt đầu Vào ca
+      isCheckin = true;
+      console.log(`🔄 Lần đầu chấm → Bắt đầu từ Vào ca`);
     }
 
-    const isCheckin = lastStatus[code];
+    // Lưu trạng thái mới
+    lastStatus[code] = { date: today, isCheckin };
     const typeText = isCheckin ? '▶ VÀO CA' : '■ RA CA';
 
-    console.log(`🔄 ${typeText} -> ${empName} | Lần tiếp theo: ${isCheckin ? 'Ra ca' : 'Vào ca'}`);
-
-    // Đảo trạng thái cho lần tiếp theo
-    lastStatus[code] = !lastStatus[code];
+    console.log(`✅ ${typeText} -> ${empName} | Lần tiếp theo: ${isCheckin ? 'Ra ca' : 'Vào ca'}`);
 
     // Gửi Discord
     const embed = buildEmbed(empName, time, isCheckin);
@@ -102,28 +126,32 @@ app.post('/webhook/dahahi', async (req, res) => {
   }
 });
 
-// ===== XEM TRẠNG THÁI TẤT CẢ =====
+// ===== XEM TRẠNG THÁI =====
 app.get('/status', (req, res) => {
+  const today = getToday();
+  const afterReset = isAfterResetTime();
   const result = {};
-  for (const [code, status] of Object.entries(lastStatus)) {
-    result[code] = status ? 'Lần cuối: Vào → Tiếp theo: Ra' : 'Lần cuối: Ra → Tiếp theo: Vào';
+  for (const [code, info] of Object.entries(lastStatus)) {
+    const note = info.date !== today ? '(Ngày mới sẽ reset sau 7:30)' : '';
+    result[code] = `${info.isCheckin ? 'Lần cuối: Vào' : 'Lần cuối: Ra'} ${note} → Tiếp theo: ${info.isCheckin ? 'Ra' : 'Vào'}`;
   }
-  res.json({ message: 'Trạng thái luân phiên', data: result });
+  res.json({ 
+    today, 
+    resetTime: '07:30 sáng',
+    currentStatus: afterReset ? 'Đã vào giờ reset' : 'Chưa đến giờ reset',
+    data: result 
+  });
 });
 
-// ===== TEST NHANH =====
+// ===== TEST =====
 app.get('/test', async (req, res) => {
   try {
     if (!DISCORD_WEBHOOK_URL) {
       return res.send('❌ THIẾU biến DISCORD_WEBHOOK_URL!');
     }
-    // Reset trạng thái để test
-    lastStatus['EMP00000003'] = undefined;
-    
-    await sendDiscord(buildEmbed('Dương Nhất Vy', '20/09/2026 08:00:00', true));
+    await sendDiscord(buildEmbed('Dương Nhất Vy', '20/09/2026 07:30:00', true));
     await sendDiscord(buildEmbed('Dương Nhất Vy', '20/09/2026 18:00:00', false));
-    
-    res.send('✅ Đã gửi 2 tin: Vào ca → Ra ca! Kiểm tra Discord!');
+    res.send('✅ Đã cập nhật! Reset tự động lúc 7:30 sáng mỗi ngày!');
   } catch (e) {
     res.status(500).send('❌ Lỗi: ' + e.message);
   }
@@ -132,6 +160,7 @@ app.get('/test', async (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Server chạy trên cổng ${PORT}`);
-  console.log(`🔗 Webhook: POST /webhook/dahahi`);
-  console.log(`📊 Trạng thái: GET /status`);
+  console.log(`📅 Ngày hôm nay: ${getToday()}`);
+  console.log(`⏰ Giờ reset: 07:30 sáng`);
+  console.log(`🕐 Hiện tại: ${isAfterResetTime() ? 'Đã qua giờ reset' : 'Chưa đến giờ reset'}`);
 });
