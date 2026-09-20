@@ -42,12 +42,12 @@ const employeeNames = {
   'EMP00000040': 'Nguyễn Đình Bảo An'
 };
 
-// ===== KIỂM TRA SAU 7:30 SÁNG =====
+// ===== KIỂM TRA SAU 5:30 SÁNG =====
 function isAfterResetTime() {
   const now = new Date();
   const hours = now.getHours();
   const minutes = now.getMinutes();
-  return hours > 7 || (hours === 7 && minutes >= 30);
+  return hours > 5 || (hours === 5 && minutes >= 30);
 }
 
 function getToday() {
