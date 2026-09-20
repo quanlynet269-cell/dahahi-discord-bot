@@ -15,9 +15,36 @@ const lastStatus = {};
 
 // ===== DANH SÁCH NHÂN VIÊN =====
 const employeeNames = {
+  const employeeNames = {
+  // === QUẢN LÝ ===
   'EMP00000003': 'Dương Nhất Vy',
-  'EMP000149': 'Nguyễn Thị Huyền',
-  // Thêm nhân viên khác...
+
+  // === NHÂN VIÊN ===
+  'EMP00000007': 'Lê Ngọc Anh Thi',
+  'EMP00000008': 'Nguyễn Thống Nhất',
+  'EMP00000009': 'Nghiêm Tuấn Phúc',
+  'EMP00000010': 'Trần An Nhật Minh',
+  'EMP00000011': 'Nguyễn Minh Sang',
+  'EMP00000012': 'Nguyễn Thái Tuấn Kiệt',
+  'EMP00000013': 'Trần Anh Tuấn Kiệt',
+  'EMP00000014': 'Trần Châu Thanh Kim',
+  'EMP00000015': 'Nguyễn Mạnh Duy',
+  'EMP00000018': 'Lê Thị Thu Hoà',
+  'EMP00000020': 'Nguyễn Hoàng Ngọc Châu',
+  'EMP00000023': 'Ngô Thanh Trúc',
+  'EMP00000024': 'Trần Khả Di',
+  'EMP00000025': 'Nguyễn Duy Chiên',
+  'EMP00000026': 'Ngô Thanh Hảo',
+  'EMP00000030': 'Nguyễn Gia Kiệt',
+  'EMP00000032': 'Vũ Đình Nam',
+  'EMP00000033': 'Nguyễn Thu An',
+  'EMP00000035': 'Đỗ Vũ Bảo Anh',
+  'EMP00000036': 'Lâm Phước Hội',
+  'EMP00000037': 'Trần Việt Nhật',
+  'EMP00000038': 'Nguyễn Quốc Luân',
+  'EMP00000039': 'Hồ Văn Hậu',
+  'EMP00000040': 'Nguyễn Đình Bảo An'
+};
 };
 
 // ===== KIỂM TRA SAU 7:30 SÁNG KHÔNG =====
