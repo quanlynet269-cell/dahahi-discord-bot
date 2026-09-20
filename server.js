@@ -9,18 +9,17 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
 console.log('🔑 Webhook URL:', DISCORD_WEBHOOK_URL ? '✅ Đã cấu hình' : '❌ THIẾU URL!');
 
-// Map mã nhân viên → tên hiển thị (thêm/sửa danh sách của bạn)
+// ===== DANH SÁCH NHÂN VIÊN =====
 const employeeNames = {
+  'EMP00000003': 'Dương Nhất Vy',
   'EMP000149': 'Nguyễn Thị Huyền',
-  'P0001': 'Nguyễn Văn A',
-  'P0002': 'Nguyễn Văn B',
-  // Thêm nhân viên của bạn ở đây...
+  // Thêm nhân viên khác ở đây...
 };
 
-// Gửi tin vào Discord
+// ===== GỬI TIN DISCORD =====
 async function sendDiscord(embed) {
   try {
-    console.log('📤 Đang gửi tin đến Discord...');
+    console.log('📤 Đang gửi Discord...');
     await axios.post(DISCORD_WEBHOOK_URL, {
       embeds: [embed],
       username: 'Bot Chấm Công'
@@ -29,30 +28,26 @@ async function sendDiscord(embed) {
     return true;
   } catch (e) {
     console.error('❌ Lỗi gửi Discord:', e.response?.status || e.message);
-    if (e.response?.data) console.error('Chi tiết:', e.response.data);
     return false;
   }
 }
 
-// Tạo tin nhắn đẹp
-function buildEmbed(code, type, time, device) {
-  const name = employeeNames[code] || `Mã: ${code}`;
-  const isIn = type === 'checkin' || type === 'in';
-  
+// ===== TẠO TIN NHẮN =====
+function buildEmbed(name, time, isCheckin) {
   return {
-    title: isIn ? '▶ NHÂN VIÊN VÀO CA' : '■ NHÂN VIÊN RA CA',
-    color: isIn ? 5763719 : 15548997,
+    title: isCheckin ? '▶ NHÂN VIÊN VÀO CA' : '■ NHÂN VIÊN RA CA',
+    color: isCheckin ? 5763719 : 15548997,
     fields: [
       { name: '👤 Nhân viên', value: `**${name}**`, inline: true },
       { name: '⏰ Thời gian', value: time || '—', inline: true },
-      { name: '📍 Thiết bị', value: device || 'Máy chấm công', inline: false }
+      { name: '📍 Thiết bị', value: 'Máy chấm công', inline: false }
     ],
     footer: { text: 'Hệ thống chấm công DAHAHI' },
     timestamp: new Date().toISOString()
   };
 }
 
-// ===== WEBHOOK NHẬN DỮ LIỆU TỪ DAHAHI =====
+// ===== XỬ LÝ WEBHOOK TỪ DAHAHI =====
 app.post('/webhook/dahahi', async (req, res) => {
   try {
     const p = req.body;
@@ -62,29 +57,24 @@ app.post('/webhook/dahahi', async (req, res) => {
     console.log(JSON.stringify(p, null, 2));
     console.log('═'.repeat(60));
 
-    // === ĐỌC TÊN TRƯỜNG THEO ĐỊNH DẠNG DAHAHI ===
-    // Thử tất cả các tên trường có thể có của DAHAHI
-    const code = p.employeeCode || p.maNhanVien || p.UserId || p.MaNhanVien || p.id || p.MaNV;
-    const checkType = p.checkType || p.loaiSuKien || p.type || p.LoaiSuKien;
-    const time = p.time || p.thoiGian || p.CheckTime || p.ThoiGian || p.TG;
-    const device = p.deviceName || p.tenThietBi || p.DeviceName || p.ThietBi || p.MaMay;
+    // === ĐỌC ĐÚNG TÊN TRƯỜNG DAHAHI ===
+    const code = p.EmployeeCode || p.FacePersonId;
+    const empName = p.EmployeeName || employeeNames[code] || `Mã: ${code}`;
+    const checkTime = p.CheckinTime;
+    const isCheckin = true; // DAHAHI gửi chỉ "vào ca" theo định dạng này
 
-    console.log(`🔍 Phân tích → Mã NV: ${code || '(trống)'} | Loại: ${checkType || '(trống)'} | Thời gian: ${time || '(trống)'}`);
+    console.log(`✅ Đọc được -> Mã: ${code} | Tên: ${empName} | Thời gian: ${checkTime}`);
 
     if (!code) {
-      console.log('⚠️ KHÔNG TÌM THẤY MÃ NHÂN VIÊN! Dữ liệu trên đây là toàn bộ DAHAHI gửi.');
+      console.log('⚠️ KHÔNG TÌM THẤY MÃ NHÂN VIÊN!');
       return res.status(200).json({ ok: false, note: 'Thiếu mã nhân viên' });
     }
 
-    // Xác định vào ca / ra ca
-    const isIn = ['checkin', 'in', 'vao', 'Vào', '1', 1, true].includes(String(checkType).toLowerCase());
-    const eventType = isIn ? 'checkin' : 'checkout';
-
     // Gửi Discord
-    const embed = buildEmbed(code, eventType, time, device);
-    const sent = await sendDiscord(embed);
+    const embed = buildEmbed(empName, checkTime, isCheckin);
+    await sendDiscord(embed);
 
-    res.json({ ok: true, sent: sent, employee: code, eventType });
+    res.json({ ok: true, employee: empName, time: checkTime });
   } catch (e) {
     console.error('❌ LỖI XỬ LÝ:', e.message);
     res.status(500).json({ error: e.message });
@@ -95,32 +85,17 @@ app.post('/webhook/dahahi', async (req, res) => {
 app.get('/test', async (req, res) => {
   try {
     if (!DISCORD_WEBHOOK_URL) {
-      return res.send('❌ THIẾU biến môi trường DISCORD_WEBHOOK_URL trên Render!');
+      return res.send('❌ THIẾU biến DISCORD_WEBHOOK_URL trên Render!');
     }
-    const embed = buildEmbed('EMP000149', 'checkin', new Date().toLocaleString('vi-VN'), 'Máy chấm công chính');
-    const sent = await sendDiscord(embed);
-    if (sent) {
-      res.send('✅ Test thành công! Kiểm tra kênh Discord #cham-cong ngay!');
-    } else {
-      res.status(500).send('❌ Gửi thất bại — xem Logs trên Render chi tiết');
-    }
+    const embed = buildEmbed('Dương Nhất Vy', '20/09/2026 18:51:52', true);
+    await sendDiscord(embed);
+    res.send('✅ Test thành công! Kiểm tra Discord ngay!');
   } catch (e) {
     res.status(500).send('❌ Lỗi: ' + e.message);
   }
 });
 
-// ===== KIỂM TRA TRẠNG THÁI =====
-app.get('/health', (req, res) => {
-  res.json({
-    ok: true,
-    webhookConfigured: !!DISCORD_WEBHOOK_URL,
-    message: 'Server đang chạy bình thường'
-  });
-});
-
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Server chạy trên cổng ${PORT}`);
-  console.log(`🔗 Webhook: POST /webhook/dahahi`);
-  console.log(`🧪 Test: GET /test`);
 });
