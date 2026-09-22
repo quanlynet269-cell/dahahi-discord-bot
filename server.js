@@ -11,7 +11,7 @@ console.log('🔑 Webhook URL:', DISCORD_WEBHOOK_URL ? '✅ Đã cấu hình' : 
 const lastStatus = {};
 const recentRequests = new Map(); // Ngăn gửi trùng
 
-// ===== HÀM ĐỢI (MỚI THÊM) ✅ =====
+// ===== HÀM ĐỢI =====
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -30,7 +30,7 @@ const employeeNames = {
   'EMP00000015': 'Nguyễn Mạnh Duy',
   'EMP00000018': 'Lê Thị Thu Hoà',
   'EMP00000020': 'Nguyễn Hoàng Ngọc Châu',
-  'EMP0000023': 'Ngô Thanh Trúc',
+  'EMP00000023': 'Ngô Thanh Trúc',
   'EMP00000024': 'Trần Khả Di',
   'EMP00000025': 'Nguyễn Duy Chiên',
   'EMP00000026': 'Ngô Thanh Hảo',
@@ -57,26 +57,31 @@ function getToday() {
   return new Date().toISOString().split('T')[0];
 }
 
-// ===== CHỐNG GỬI TRÙNG =====
-function isDuplicate(code, timeStr) {
-  const key = code + '|' + timeStr;
+// ===== CHỐNG GỬI TRÙNG: CÙNG 1 NV TRONG 2 PHÚT → BỎ QUA ✅✅✅ =====
+function isDuplicate(code) {
   const now = Date.now();
+  const TWO_MINUTES = 2 * 60 * 1000; // 2 phút = 120.000 mili giây
   
-  if (recentRequests.has(key)) {
-    const lastTime = recentRequests.get(key);
-    if (now - lastTime < 5000) { // Trong vòng 5 giây → trùng
-      console.log('⚠️ Phát hiện gửi TRÙNG → Bỏ qua!');
+  // Kiểm tra xem nhân viên này đã gửi tin trong 2 phút qua chưa
+  if (recentRequests.has(code)) {
+    const lastTime = recentRequests.get(code);
+    if (now - lastTime < TWO_MINUTES) {
+      const soGiay = Math.round((TWO_MINUTES - (now - lastTime)) / 1000);
+      console.log(`⚠️ Nhân viên [${code}] đã gửi tin cách đây chưa đầy 2 phút → Bỏ qua! (còn ${soGiay}s nữa mới cho phép)`);
       return true;
     }
   }
   
-  recentRequests.set(key, now);
-  // Xóa sau 10 giây để giải phóng bộ nhớ
-  setTimeout(() => recentRequests.delete(key), 10000);
+  // Ghi nhận thời gian gửi mới nhất
+  recentRequests.set(code, now);
+  
+  // Xóa sau 2 phút 10 giây để giải phóng bộ nhớ
+  setTimeout(() => recentRequests.delete(code), TWO_MINUTES + 10000);
+  
   return false;
 }
 
-// ===== GỬI DISCORD (ĐÃ SỬA) ✅✅✅ =====
+// ===== GỬI DISCORD =====
 async function sendDiscord(embed) {
   try {
     await axios.post(DISCORD_WEBHOOK_URL, {
@@ -85,7 +90,7 @@ async function sendDiscord(embed) {
     });
     console.log('✅ Gửi thành công!');
     
-    // ✅ MỚI THÊM: Đợi 1.5 giây sau mỗi lần gửi → Tránh lỗi 429
+    // Đợi 1.5 giây sau mỗi lần gửi → Tránh lỗi 429
     await sleep(1500);
     
     return true;
@@ -93,10 +98,10 @@ async function sendDiscord(embed) {
     const status = e.response?.status;
     console.error('❌ Lỗi gửi:', status || e.message);
     
-    // ✅ MỚI THÊM: Nếu bị lỗi 429 → Đợi rồi thử lại 1 lần
+    // Nếu bị lỗi 429 → Đợi rồi thử lại 1 lần
     if (status === 429) {
       const retryAfter = e.response?.headers?.['retry-after'] || 30;
-      const waitMs = retryAfter * 1000 + 1000; // Đợi thêm 1s dự phòng
+      const waitMs = retryAfter * 1000 + 1000;
       console.log(`⏳ Bị Discord chặn (429), đợi ${retryAfter}s rồi thử lại...`);
       
       await sleep(waitMs);
@@ -142,10 +147,10 @@ app.post('/webhook/dahahi', async (req, res) => {
     const code = p.EmployeeCode || p.FacePersonId;
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
     
-    // === CHỐNG TRÙNG ===
-    if (isDuplicate(code, timeStr)) {
-      console.log('🔁 Bỏ qua yêu cầu trùng lặp');
-      return res.json({ ok: true, note: 'duplicate_ignored' });
+    // === CHỐNG TRÙNG: CÙNG NV TRONG 2 PHÚT BỎ QUA ✅ ===
+    if (isDuplicate(code)) {
+      console.log('🔁 Bỏ qua yêu cầu (trùng nhân viên trong 2 phút)');
+      return res.json({ ok: true, note: 'duplicate_employee_2min' });
     }
     
     console.log('📩 NHẬN DỮ LIỆU: ' + JSON.stringify(p, null, 2));
@@ -192,13 +197,13 @@ app.get('/status', (req, res) => {
 // ===== TEST =====
 app.get('/test', async (req, res) => {
   if (!DISCORD_WEBHOOK_URL) return res.send('❌ Thiếu Webhook URL');
-  res.send('✅ Chống trùng lặp + Chống lỗi 429 đã kích hoạt!');
+  res.send('✅ Chống trùng nhân viên 2 phút + Chống lỗi 429 đã kích hoạt!');
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('🚀 Server cổng ' + PORT);
-  console.log('🛡️ Chống gửi trùng: BẬT');
+  console.log('🛡️ Chống gửi trùng cùng NV trong 2 phút: BẬT');
   console.log('⏱️ Đợi giữa các lần gửi: 1.5s');
   console.log('🔄 Tự động thử lại khi lỗi 429: BẬT');
 });
