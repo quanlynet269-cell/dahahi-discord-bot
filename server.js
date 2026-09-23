@@ -9,11 +9,55 @@ console.log('🔑 Webhook URL:', DISCORD_WEBHOOK_URL ? '✅ Đã cấu hình' : 
 
 // ===== LƯU TRẠNG THÁI =====
 const lastStatus = {};
-const recentRequests = new Map(); // Ngăn gửi trùng
+const recentRequests = new Map(); // Ngăn gửi trùng cùng NV trong 2 phút
+
+// ===== HÀNG ĐỢI GỬI TIN (MỚI - QUAN TRỌNG NHẤT) ✅✅✅ =====
+const messageQueue = []; // Hàng đợi chứa các tin cần gửi
+let isProcessingQueue = false; // Đang xử lý hàng đợi hay chưa
+const SEND_INTERVAL = 3000; // Gửi 1 tin mỗi 3 giây → 20 tin/phút (an toàn tuyệt đối)
 
 // ===== HÀM ĐỢI =====
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ===== XỬ LÝ HÀNG ĐỢI TỰ ĐỘNG =====
+async function processQueue() {
+  if (isProcessingQueue) return; // Đang chạy rồi thì không chạy lại
+  if (messageQueue.length === 0) return; // Hàng đợi rỗng thì dừng
+  
+  isProcessingQueue = true;
+  console.log(`📦 Bắt đầu xử lý hàng đợi: còn ${messageQueue.length} tin`);
+  
+  while (messageQueue.length > 0) {
+    const embed = messageQueue.shift(); // Lấy tin đầu tiên ra
+    
+    try {
+      await sendDiscordDirect(embed);
+      console.log(`✅ Đã gửi từ hàng đợi. Còn lại: ${messageQueue.length} tin`);
+    } catch (e) {
+      console.error(`❌ Gửi từ hàng đợi lỗi, đưa lại cuối hàng đợi:`, e.message);
+      messageQueue.push(embed); // Thất bại → đưa lại cuối hàng đợi thử sau
+      await sleep(5000); // Đợi 5 giây rồi thử tiếp
+    }
+    
+    // ✅ LUÔN ĐỢI 3 GIÂY GIỮA CÁC LẦN GỬI → ĐẢM BẢO KHÔNG BỊ CHẶN
+    await sleep(SEND_INTERVAL);
+  }
+  
+  isProcessingQueue = false;
+  console.log('📦 Hàng đợi đã xử lý xong!');
+}
+
+// ===== THÊM TIN VÀO HÀNG ĐỢI =====
+function addToQueue(embed) {
+  messageQueue.push(embed);
+  console.log(`➕ Thêm vào hàng đợi. Vị trí: ${messageQueue.length}`);
+  
+  // Kích hoạt xử lý hàng đợi (nếu chưa chạy)
+  if (!isProcessingQueue) {
+    processQueue();
+  }
 }
 
 // ===== DANH SÁCH NHÂN VIÊN =====
@@ -57,71 +101,52 @@ function getToday() {
   return new Date().toISOString().split('T')[0];
 }
 
-// ===== CHỐNG GỬI TRÙNG: CÙNG 1 NV TRONG 2 PHÚT → BỎ QUA ✅✅✅ =====
+// ===== CHỐNG GỬI TRÙNG: CÙNG 1 NV TRONG 2 PHÚT =====
 function isDuplicate(code) {
   const now = Date.now();
-  const TWO_MINUTES = 2 * 60 * 1000; // 2 phút = 120.000 mili giây
+  const TWO_MINUTES = 2 * 60 * 1000;
   
-  // Kiểm tra xem nhân viên này đã gửi tin trong 2 phút qua chưa
   if (recentRequests.has(code)) {
     const lastTime = recentRequests.get(code);
     if (now - lastTime < TWO_MINUTES) {
       const soGiay = Math.round((TWO_MINUTES - (now - lastTime)) / 1000);
-      console.log(`⚠️ Nhân viên [${code}] đã gửi tin cách đây chưa đầy 2 phút → Bỏ qua! (còn ${soGiay}s nữa mới cho phép)`);
+      console.log(`⚠️ Nhân viên [${code}] đã gửi tin cách đây chưa đầy 2 phút → Bỏ qua! (còn ${soGiay}s)`);
       return true;
     }
   }
   
-  // Ghi nhận thời gian gửi mới nhất
   recentRequests.set(code, now);
-  
-  // Xóa sau 2 phút 10 giây để giải phóng bộ nhớ
   setTimeout(() => recentRequests.delete(code), TWO_MINUTES + 10000);
-  
   return false;
 }
 
-// ===== GỬI DISCORD =====
-async function sendDiscord(embed) {
+// ===== GỬI DISCORD TRỰC TIẾP (CHỈ DÙNG TRONG HÀNG ĐỢI) =====
+async function sendDiscordDirect(embed) {
   try {
     await axios.post(DISCORD_WEBHOOK_URL, {
       embeds: [embed],
       username: 'Bot Chấm Công'
     });
-    console.log('✅ Gửi thành công!');
-    
-    // Đợi 1.5 giây sau mỗi lần gửi → Tránh lỗi 429
-    await sleep(1500);
-    
     return true;
   } catch (e) {
     const status = e.response?.status;
-    console.error('❌ Lỗi gửi:', status || e.message);
     
-    // Nếu bị lỗi 429 → Đợi rồi thử lại 1 lần
+    // Nếu bị lỗi 429 → Đợi đủ thời gian Discord yêu cầu
     if (status === 429) {
-      const retryAfter = e.response?.headers?.['retry-after'] || 30;
-      const waitMs = retryAfter * 1000 + 1000;
-      console.log(`⏳ Bị Discord chặn (429), đợi ${retryAfter}s rồi thử lại...`);
-      
-      await sleep(waitMs);
-      
-      try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-          embeds: [embed],
-          username: 'Bot Chấm Công'
-        });
-        console.log('✅ Thử lại thành công!');
-        await sleep(1500);
-        return true;
-      } catch (e2) {
-        console.error('❌ Thử lại vẫn lỗi:', e2.response?.status || e2.message);
-        return false;
-      }
+      const retryAfter = e.response?.headers?.['retry-after'] || 60;
+      console.log(`⏳ Discord yêu cầu đợi ${retryAfter}s`);
+      await sleep(retryAfter * 1000 + 2000);
+      throw new Error(`429_wait_${retryAfter}s`);
     }
     
-    return false;
+    throw e;
   }
+}
+
+// ===== GỬI DISCORD (Qua hàng đợi) =====
+async function sendDiscord(embed) {
+  addToQueue(embed);
+  return true;
 }
 
 // ===== TẠO NỘI DUNG =====
@@ -147,10 +172,9 @@ app.post('/webhook/dahahi', async (req, res) => {
     const code = p.EmployeeCode || p.FacePersonId;
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
     
-    // === CHỐNG TRÙNG: CÙNG NV TRONG 2 PHÚT BỎ QUA ✅ ===
+    // === CHỐNG TRÙNG: CÙNG NV TRONG 2 PHÚT BỎ QUA ===
     if (isDuplicate(code)) {
-      console.log('🔁 Bỏ qua yêu cầu (trùng nhân viên trong 2 phút)');
-      return res.json({ ok: true, note: 'duplicate_employee_2min' });
+      return res.json({ ok: true, note: 'duplicate_employee_2min', queued: false });
     }
     
     console.log('📩 NHẬN DỮ LIỆU: ' + JSON.stringify(p, null, 2));
@@ -180,9 +204,10 @@ app.post('/webhook/dahahi', async (req, res) => {
     lastStatus[code] = { date: today, isCheckin };
     console.log('🔄 ' + empName + ' → ' + (isCheckin ? 'VÀO CA' : 'RA CA'));
     
-    await sendDiscord(buildEmbed(empName, timeStr, isCheckin));
+    // ✅ THAY ĐỔI QUAN TRỌNG: Thêm vào HÀNG ĐỢI thay vì gửi ngay
+    sendDiscord(buildEmbed(empName, timeStr, isCheckin));
     
-    res.json({ ok: true });
+    res.json({ ok: true, queued: true, queuePosition: messageQueue.length });
   } catch (e) {
     console.error('❌ LỖI:', e.message);
     res.status(500).json({ error: e.message });
@@ -191,19 +216,24 @@ app.post('/webhook/dahahi', async (req, res) => {
 
 // ===== TRẠNG THÁI =====
 app.get('/status', (req, res) => {
-  res.json({ today: getToday(), data: lastStatus });
+  res.json({ 
+    today: getToday(), 
+    data: lastStatus,
+    queueLength: messageQueue.length,
+    isProcessingQueue: isProcessingQueue
+  });
 });
 
 // ===== TEST =====
 app.get('/test', async (req, res) => {
   if (!DISCORD_WEBHOOK_URL) return res.send('❌ Thiếu Webhook URL');
-  res.send('✅ Chống trùng nhân viên 2 phút + Chống lỗi 429 đã kích hoạt!');
+  res.send('✅ Hệ thống hàng đợi chống lỗi 429 đã kích hoạt! Gửi 1 tin mỗi 3 giây.');
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('🚀 Server cổng ' + PORT);
   console.log('🛡️ Chống gửi trùng cùng NV trong 2 phút: BẬT');
-  console.log('⏱️ Đợi giữa các lần gửi: 1.5s');
-  console.log('🔄 Tự động thử lại khi lỗi 429: BẬT');
+  console.log('📦 Hệ thống hàng đợi: BẬT (gửi 1 tin mỗi 3 giây)');
+  console.log('🔒 Bảo vệ lỗi 429: TRIỆT ĐỂ');
 });
