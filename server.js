@@ -1,65 +1,42 @@
 const express = require('express');
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const axios = require('axios');
 require('dotenv').config();
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
+// ============================================================
+// ⚙️ CẤU HÌNH
+// ============================================================
 const CONFIG = {
-  SEND_INTERVAL: 1000,
+  SEND_INTERVAL: 3000,        // 3 giây/tin = 20 tin/phút — an toàn tuyệt đối
   ANTI_DUPLICATE_MS: 2 * 60 * 1000,
-  MAX_QUEUE_SIZE: 200
+  MAX_QUEUE_SIZE: 100
 };
 
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
-const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
-
-console.log('🔑 Kiểm tra biến môi trường...');
-console.log('DISCORD_BOT_TOKEN:', DISCORD_BOT_TOKEN ? '✅ Đã có (' + DISCORD_BOT_TOKEN.substring(0, 6) + '...)' : '❌ Thiếu');
-console.log('DISCORD_CHANNEL_ID:', DISCORD_CHANNEL_ID ? '✅ Đã có (' + DISCORD_CHANNEL_ID + ')' : '❌ Thiếu');
-
-if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID) {
-  console.error('❌ Thiếu biến môi trường! Vào Render → Environment thêm.');
+// ============================================================
+// 🔑 KIỂM TRA WEBHOOK
+// ============================================================
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+if (!DISCORD_WEBHOOK_URL) {
+  console.error('❌ Thiếu DISCORD_WEBHOOK_URL!');
   process.exit(1);
 }
+console.log('🔑 Webhook URL: ✅ Đã cấu hình');
+console.log(`⚙️ Gửi 1 tin mỗi ${CONFIG.SEND_INTERVAL/1000}s → ${Math.round(60000/CONFIG.SEND_INTERVAL)} tin/phút`);
 
-const bot = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
-});
-
-bot.on('ready', () => {
-  console.log('=========================================');
-  console.log(`🤖 ✅ BOT ĐĂNG NHẬP THÀNH CÔNG: ${bot.user.tag}`);
-  console.log(`📢 Kênh đích ID: ${DISCORD_CHANNEL_ID}`);
-  const channel = bot.channels.cache.get(DISCORD_CHANNEL_ID);
-  if (channel) {
-    console.log(`📢 ✅ Tìm thấy kênh: #${channel.name}`);
-  } else {
-    console.log(`⚠️ Không tìm thấy kênh, kiểm tra ID và Bot đã vào máy chủ`);
-  }
-  console.log('=========================================');
-});
-
-bot.on('error', (err) => {
-  console.error('❌ LỖI KẾT NỐI BOT:', err.message);
-});
-
-bot.login(DISCORD_BOT_TOKEN)
-  .catch(err => {
-    console.error('❌ KHÔNG ĐĂNG NHẬP ĐƯỢC:', err.message);
-    process.exit(1);
-  });
-
-// === PHẦN CÒN LẠI GIỮ NGUYÊN ===
+// ============================================================
+// 📦 HÀNG ĐỢI
+// ============================================================
 const messageQueue = [];
 let isProcessingQueue = false;
+
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function addToQueue(embed) {
-  if (messageQueue.length >= CONFIG.MAX_QUEUE_SIZE) { console.log('⚠️ Hàng đợi đầy'); return false; }
+  if (messageQueue.length >= CONFIG.MAX_QUEUE_SIZE) {
+    console.log('⚠️ Hàng đợi đầy');
+    return false;
+  }
   messageQueue.push({ embed, addedAt: Date.now() });
   if (!isProcessingQueue) processQueue();
   return true;
@@ -67,17 +44,25 @@ function addToQueue(embed) {
 
 async function processQueue() {
   isProcessingQueue = true;
-  const channel = bot.channels.cache.get(DISCORD_CHANNEL_ID);
-  if (!channel) { console.error('❌ Không tìm thấy kênh'); isProcessingQueue = false; return; }
   while (messageQueue.length > 0) {
     const { embed } = messageQueue.shift();
-    try { await channel.send({ embeds: [embed] }); }
-    catch (e) { console.error('❌ Lỗi gửi:', e.message); }
+    try {
+      await axios.post(DISCORD_WEBHOOK_URL, {
+        embeds: [embed],
+        username: 'Bot Chấm Công'
+      });
+      console.log(`✅ Gửi thành công — Còn lại: ${messageQueue.length}`);
+    } catch (e) {
+      console.error('❌ Lỗi gửi:', e.response?.status || e.message);
+    }
     await sleep(CONFIG.SEND_INTERVAL);
   }
   isProcessingQueue = false;
 }
 
+// ============================================================
+// 👥 DANH SÁCH NHÂN VIÊN
+// ============================================================
 const employeeNames = {
   'EMP00000003': 'Dương Nhất Vy',
   'EMP00000007': 'Lê Ngọc Anh Thi',
@@ -106,43 +91,63 @@ const employeeNames = {
   'EMP00000040': 'Nguyễn Đình Bảo An'
 };
 
+// ============================================================
+// 🔒 CHỐNG TRÙNG
+// ============================================================
 const lastStatus = {};
 const recentRequests = new Map();
-function getToday() { return new Date().toISOString().split('T')[0]; }
+
+function getToday() {
+  return new Date().toISOString().split('T')[0];
+}
+
 function isDuplicate(code) {
   if (recentRequests.has(code)) {
-    if (Date.now() - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) return true;
+    if (Date.now() - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) {
+      return true;
+    }
   }
   recentRequests.set(code, Date.now());
   return false;
 }
 
+// ============================================================
+// 🎨 TẠO TIN NHẮN
+// ============================================================
 function buildEmbed(name, time, isCheckin, code) {
-  return new EmbedBuilder()
-    .setTitle(isCheckin ? '✅ ĐIỂM DANH — ĐẾN LÀM' : '🏠 ĐIỂM DANH — KẾT THÚC')
-    .setDescription(`**${name}**`)
-    .setColor(isCheckin ? 0x57f287 : 0xf38ba8)
-    .addFields(
+  return {
+    title: isCheckin ? '✅ VÀO CA' : '👋 RA CA',
+    description: `**${name}**`,
+    color: isCheckin ? 5763719 : 15548997,
+    fields: [
       { name: '🆔 Mã NV', value: `\`${code}\``, inline: true },
-      { name: '🕐 Thời gian', value: time, inline: true }
-    )
-    .setTimestamp();
+      { name: '⏰ Thời gian', value: time, inline: true }
+    ],
+    timestamp: new Date().toISOString()
+  };
 }
 
+// ============================================================
+// 📥 API NHẬN DỮ LIỆU
+// ============================================================
 app.post('/webhook/dahahi', async (req, res) => {
   try {
     const p = req.body;
     const code = p.EmployeeCode || p.FacePersonId;
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
+
     if (!code) return res.status(400).json({ error: 'Thiếu mã nhân viên' });
     if (isDuplicate(code)) return res.json({ note: 'Bỏ qua trùng lặp' });
+
     const empName = employeeNames[code] || code;
     const today = getToday();
     let isCheckin = true;
+
     if (lastStatus[code] && lastStatus[code].date === today) {
-      isCheckin = lastStatus[code].type === 'out';
+      isCheckin = !lastStatus[code].isCheckin;
     }
-    lastStatus[code] = { date: today, type: isCheckin ? 'in' : 'out' };
+    lastStatus[code] = { date: today, isCheckin };
+
     addToQueue(buildEmbed(empName, timeStr, isCheckin, code));
     res.json({ ok: true, name: empName, type: isCheckin ? 'in' : 'out' });
   } catch (e) {
@@ -151,20 +156,22 @@ app.post('/webhook/dahahi', async (req, res) => {
   }
 });
 
+// ============================================================
+// 🧪 KIỂM TRA
+// ============================================================
 app.get('/test-send', (req, res) => {
   addToQueue(buildEmbed('Nguyễn Văn Test', new Date().toLocaleString('vi-VN'), true, 'TEST001'));
-  res.json({ ok: true, message: 'Đã gửi tin thử — Kiểm tra Discord!' });
+  res.json({ ok: true, message: 'Đã gửi tin thử → Kiểm tra Discord!' });
 });
 
-app.get('/status', (req, res) => {
-  res.json({ botReady: bot.isReady(), queue: messageQueue.length });
-});
-
+// ============================================================
+// 🚀 KHỞI ĐỘNG
+// ============================================================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
-  console.log(`🤖 Chờ Bot kết nối...`);
+  console.log(`✅ Sử dụng Webhook — Không cần Bot kết nối!`);
   console.log(`📡 Địa chỉ: https://dahahi-discord-bot.onrender.com`);
   console.log('=========================================');
 });
