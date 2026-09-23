@@ -1,157 +1,79 @@
 const express = require('express');
-const axios = require('axios');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 require('dotenv').config();
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ============================================================
-// ⚙️ CẤU HÌNH TỐI ƯU - CHỈNH SỬA Ở ĐÂY NẾU CẦN
+// ⚙️ CẤU HÌNH
 // ============================================================
 const CONFIG = {
-  // Thời gian đợi giữa các lần gửi (mili giây)
-  // 2500 = 2.5s → 24 tin/phút (an toàn tuyệt đối, vẫn nhanh)
-  // 2000 = 2s → 30 tin/phút (ngưỡng giới hạn, không khuyến nghị)
-  // 3000 = 3s → 20 tin/phút (an toàn nhất, hơi chậm chút)
-  SEND_INTERVAL: 2500,
-  
-  // Thời gian chống trùng cùng nhân viên (mili giây)
-  // 2 * 60 * 1000 = 2 phút
+  SEND_INTERVAL: 1000,        // 1 giây/gửi — giới hạn 3000 tin/phút
   ANTI_DUPLICATE_MS: 2 * 60 * 1000,
-  
-  // Giới hạn hàng đợi (tránh quá tải)
-  MAX_QUEUE_SIZE: 100,
-  
-  // Thời gian chờ tối đa khi lỗi 429 (giây)
-  MAX_RETRY_AFTER: 120,
+  MAX_QUEUE_SIZE: 200
 };
 
 // ============================================================
-// 🔑 KIỂM TRA WEBHOOK
+// 🤖 KẾT NỐI BOT DISCORD
 // ============================================================
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-if (!DISCORD_WEBHOOK_URL) {
-  console.error('❌❌❌ THIẾU DISCORD_WEBHOOK_URL! Vào Render → Environment thêm biến này.');
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+
+if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID) {
+  console.error('❌ Thiếu DISCORD_BOT_TOKEN hoặc DISCORD_CHANNEL_ID');
   process.exit(1);
 }
-console.log('🔑 Webhook URL: ✅ Đã cấu hình');
-console.log(`⚙️ Gửi 1 tin mỗi ${CONFIG.SEND_INTERVAL / 1000}s → ${Math.round(60000 / CONFIG.SEND_INTERVAL)} tin/phút`);
+
+const bot = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+});
+
+bot.login(DISCORD_BOT_TOKEN);
+
+bot.on('ready', () => {
+  console.log(`🤖 Bot đã đăng nhập: ${bot.user.tag}`);
+  console.log(`📢 Kênh đích: ${DISCORD_CHANNEL_ID}`);
+});
 
 // ============================================================
-// 📦 HỆ THỐNG HÀNG ĐỢI THÔNG MINH (TỐI ƯU NHẤT)
+// 📦 HÀNG ĐỢI GỬI TIN
 // ============================================================
 const messageQueue = [];
 let isProcessingQueue = false;
-let discordBlockedUntil = 0; // Thời điểm Discord mở khóa
 
-// Hàm đợi
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Kiểm tra xem Discord có đang chặn không
-function isDiscordBlocked() {
-  return Date.now() < discordBlockedUntil;
-}
-
-// Thêm tin vào hàng đợi
 function addToQueue(embed) {
   if (messageQueue.length >= CONFIG.MAX_QUEUE_SIZE) {
-    console.error(`⚠️ Hàng đợi đầy (${CONFIG.MAX_QUEUE_SIZE} tin) → Bỏ qua tin mới nhất!`);
+    console.log('⚠️ Hàng đợi đầy, bỏ qua');
     return false;
   }
-  
-  messageQueue.push({
-    embed,
-    addedAt: Date.now(),
-    retryCount: 0
-  });
-  
-  const position = messageQueue.length;
-  const estimatedWait = (position - 1) * (CONFIG.SEND_INTERVAL / 1000);
-  console.log(`➕ Thêm hàng đợi. Vị trí: ${position} | Ước tính đợi: ${estimatedWait}s`);
-  
-  // Kích hoạt xử lý hàng đợi
-  if (!isProcessingQueue) {
-    processQueue();
-  }
-  
+  messageQueue.push({ embed, addedAt: Date.now() });
+  console.log(`➕ Thêm hàng đợi: ${messageQueue.length}`);
+  if (!isProcessingQueue) processQueue();
   return true;
 }
 
-// Xử lý hàng đợi tự động
 async function processQueue() {
-  if (isProcessingQueue) return;
-  if (messageQueue.length === 0) return;
-  
   isProcessingQueue = true;
-  console.log(`📦 Bắt đầu xử lý hàng đợi: ${messageQueue.length} tin chờ`);
-  
+  const channel = bot.channels.cache.get(DISCORD_CHANNEL_ID);
+  if (!channel) {
+    console.error('❌ Không tìm thấy kênh! Kiểm tra DISCORD_CHANNEL_ID và quyền bot');
+    isProcessingQueue = false;
+    return;
+  }
+
   while (messageQueue.length > 0) {
-    // Nếu Discord đang chặn → đợi đến khi hết
-    if (isDiscordBlocked()) {
-      const waitMs = discordBlockedUntil - Date.now() + 1000;
-      const waitSec = Math.ceil(waitMs / 1000);
-      console.log(`⏳ Discord đang chặn, đợi ${waitSec}s nữa...`);
-      await sleep(Math.min(waitMs, 30000)); // Đợi tối đa 30s rồi kiểm tra lại
-      continue;
-    }
-    
-    const item = messageQueue.shift();
-    
+    const { embed } = messageQueue.shift();
     try {
-      await sendDiscordDirect(item.embed);
-      const waitSec = ((Date.now() - item.addedAt) / 1000).toFixed(1);
-      console.log(`✅ Gửi thành công! (chờ ${waitSec}s trong hàng đợi) | Còn lại: ${messageQueue.length}`);
+      await channel.send({ embeds: [embed] });
+      console.log(`✅ Đã gửi — Còn lại: ${messageQueue.length}`);
     } catch (e) {
-      const status = e.response?.status;
-      
-      if (status === 429) {
-        // Lỗi 429 → Đọc thời gian chặn từ Discord
-        const retryAfter = Math.min(
-          parseInt(e.response?.headers?.['retry-after']) || 60,
-          CONFIG.MAX_RETRY_AFTER
-        );
-        discordBlockedUntil = Date.now() + retryAfter * 1000;
-        console.log(`🔒 Discord chặn ${retryAfter}s → Đến ${new Date(discordBlockedUntil).toLocaleTimeString('vi-VN')}`);
-        
-        // Đưa tin này lại đầu hàng đợi để thử lại sau
-        item.retryCount++;
-        if (item.retryCount <= 5) {
-          messageQueue.unshift(item);
-          console.log(`🔄 Đưa lại hàng đợi (lần thử: ${item.retryCount}/5)`);
-        } else {
-          console.error(`❌ Tin nhắn bị bỏ qua sau 5 lần thử thất bại!`);
-        }
-        continue;
-      }
-      
-      // Lỗi khác → thử lại tối đa 3 lần
-      item.retryCount++;
-      if (item.retryCount <= 3) {
-        messageQueue.unshift(item);
-        console.log(`⚠️ Lỗi gửi (${e.message}), thử lại lần ${item.retryCount}/3 sau 5s`);
-        await sleep(5000);
-        continue;
-      }
-      
-      console.error(`❌ Bỏ qua tin nhắn sau 3 lần lỗi:`, e.message);
+      console.error('❌ Lỗi gửi:', e.message);
     }
-    
-    // Đợi giữa các lần gửi (LUÔN ĐỢI ĐỂ AN TOÀN)
     await sleep(CONFIG.SEND_INTERVAL);
   }
-  
   isProcessingQueue = false;
-  console.log('📦 Hàng đợi đã xử lý xong!');
-}
-
-// Gửi Discord trực tiếp (chỉ dùng trong hàng đợi)
-async function sendDiscordDirect(embed) {
-  await axios.post(DISCORD_WEBHOOK_URL, {
-    embeds: [embed],
-    username: 'Bot Chấm Công',
-    avatar_url: '' // Có thể thêm link avatar bot nếu muốn
-  });
 }
 
 // ============================================================
@@ -186,212 +108,105 @@ const employeeNames = {
 };
 
 // ============================================================
-// 🔄 LOGIC CHỐNG TRÙNG + XÁC ĐỊNH VÀO/RA CA
+// 🔒 CHỐNG TRÙNG
 // ============================================================
 const lastStatus = {};
 const recentRequests = new Map();
 
 function isAfterResetTime() {
-  const now = new Date();
-  const hours = now.getHours();
-  const minutes = now.getMinutes();
-  return hours > 5 || (hours === 5 && minutes >= 30);
+  const h = new Date().getHours();
+  return h > 5;
 }
 
 function getToday() {
   return new Date().toISOString().split('T')[0];
 }
 
-// Chống trùng cùng nhân viên trong khoảng thời gian cấu hình
 function isDuplicate(code) {
   const now = Date.now();
-  
   if (recentRequests.has(code)) {
-    const lastTime = recentRequests.get(code);
-    if (now - lastTime < CONFIG.ANTI_DUPLICATE_MS) {
-      const remainSec = Math.ceil((CONFIG.ANTI_DUPLICATE_MS - (now - lastTime)) / 1000);
-      console.log(`⚠️ NV [${code}] trùng trong ${CONFIG.ANTI_DUPLICATE_MS / 60000} phút → Bỏ qua (còn ${remainSec}s)`);
+    if (now - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) {
       return true;
     }
   }
-  
   recentRequests.set(code, now);
-  setTimeout(() => recentRequests.delete(code), CONFIG.ANTI_DUPLICATE_MS + 10000);
   return false;
 }
 
 // ============================================================
-// 🎨 TẠO TIN NHẮN DISCORD ĐẸP (TỐI ƯU)
+// 🎨 TẠO NỘI DUNG TIN
 // ============================================================
-function buildEmbed(name, time, isCheckin, employeeCode) {
-  return {
-    title: isCheckin ? '✅ NHÂN VIÊN VÀO CA' : '👋 NHÂN VIÊN RA CA',
-    description: isCheckin 
-      ? `**${name}** đã bắt đầu ca làm việc` 
-      : `**${name}** đã kết thúc ca làm việc`,
-    color: isCheckin ? 5763719 : 15548997, // Xanh lá / Đỏ
-    fields: [
-      { 
-        name: '👤 Họ và tên', 
-        value: `**${name}**`, 
-        inline: true 
-      },
-      { 
-        name: '🆔 Mã nhân viên', 
-        value: `\`${employeeCode}\``, 
-        inline: true 
-      },
-      { 
-        name: '⏰ Thời gian', 
-        value: `**${time || '—'}**`, 
-        inline: true 
-      }
-    ],
-    footer: { 
-      text: 'Hệ thống chấm công DAHAHI • Tối ưu chống lỗi 429',
-      icon_url: ''
-    },
-    timestamp: new Date().toISOString(),
-    thumbnail: isCheckin 
-      ? { url: 'https://cdn-icons-png.flaticon.com/512/1828/1828884.png' }
-      : { url: 'https://cdn-icons-png.flaticon.com/512/1828/1828774.png' }
-  };
+function buildEmbed(name, time, isCheckin, code) {
+  return new EmbedBuilder()
+    .setTitle(isCheckin ? '✅ ĐIỂM DANH — ĐẾN LÀM' : '🏠 ĐIỂM DANH — KẾT THÚC')
+    .setDescription(`**${name}**`)
+    .setColor(isCheckin ? 0x57f287 : 0xf38ba8)
+    .addFields(
+      { name: '🆔 Mã NV', value: `\`${code}\``, inline: true },
+      { name: '🕐 Thời gian', value: time, inline: true }
+    )
+    .setTimestamp();
 }
 
 // ============================================================
-// 📥 API NHẬN DỮ LIỆU CHẤM CÔNG
+// 📥 API NHẬN DỮ LIỆU
 // ============================================================
 app.post('/webhook/dahahi', async (req, res) => {
   try {
     const p = req.body;
-    console.log('\n' + '═'.repeat(60));
-    
     const code = p.EmployeeCode || p.FacePersonId;
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
-    
-    // Kiểm tra chống trùng
-    if (isDuplicate(code)) {
-      return res.json({ 
-        ok: true, 
-        note: 'duplicate_ignored',
-        queued: false 
-      });
-    }
-    
-    console.log('📩 NHẬN DỮ LIỆU:', JSON.stringify(p, null, 2));
-    console.log('═'.repeat(60));
-    
-    const empName = p.EmployeeName || employeeNames[code] || `Mã: ${code}`;
+
+    if (!code) return res.status(400).json({ error: 'Thiếu mã nhân viên' });
+    if (isDuplicate(code)) return res.json({ note: 'Bỏ qua trùng lặp' });
+
+    const empName = employeeNames[code] || code;
     const today = getToday();
-    const afterReset = isAfterResetTime();
-    
-    if (!code) {
-      return res.status(400).json({ ok: false, error: 'Thiếu mã nhân viên' });
-    }
-    
-    // Xác định vào/ra ca
-    const prev = lastStatus[code];
-    let isCheckin;
-    
-    if (afterReset && (!prev || prev.date !== today)) {
-      isCheckin = true;
-      console.log('🌅 Buổi sáng mới → Reset trạng thái → VÀO CA');
-    } else if (prev && prev.date === today) {
-      isCheckin = !prev.isCheckin;
+    let isCheckin = true;
+
+    if (!lastStatus[code] || lastStatus[code].date !== today) {
+      lastStatus[code] = { date: today, type: 'in' };
     } else {
-      isCheckin = true;
+      isCheckin = lastStatus[code].type === 'out';
+      lastStatus[code].type = isCheckin ? 'in' : 'out';
     }
-    
-    lastStatus[code] = { date: today, isCheckin };
-    console.log(`🔄 ${empName} [${code}] → ${isCheckin ? '✅ VÀO CA' : '👋 RA CA'}`);
-    
-    // Thêm vào hàng đợi (KHÔNG gửi ngay)
-    const queued = addToQueue(buildEmbed(empName, timeStr, isCheckin, code));
-    
-    res.json({ 
-      ok: true, 
-      queued,
-      queueLength: messageQueue.length,
-      employee: empName,
-      action: isCheckin ? 'checkin' : 'checkout'
-    });
-    
+
+    const embed = buildEmbed(empName, timeStr, isCheckin, code);
+    addToQueue(embed);
+
+    res.json({ ok: true, name: empName, type: isCheckin ? 'in' : 'out' });
   } catch (e) {
-    console.error('❌ LỖI XỬ LÝ:', e.message);
+    console.error('❌ Lỗi xử lý:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
 // ============================================================
-// 📊 API THEO DÕI TRẠNG THÁI (TỐI ƯU)
+// 🧪 API KIỂM TRA
 // ============================================================
-app.get('/status', (req, res) => {
-  const blocked = isDiscordBlocked();
-  res.json({ 
-    today: getToday(), 
-    employees: lastStatus,
-    queue: {
-      length: messageQueue.length,
-      processing: isProcessingQueue,
-      maxSize: CONFIG.MAX_QUEUE_SIZE
-    },
-    discord: {
-      blocked: blocked,
-      blockedUntil: blocked ? new Date(discordBlockedUntil).toLocaleString('vi-VN') : null,
-      webhookConfigured: !!DISCORD_WEBHOOK_URL
-    },
-    config: {
-      sendInterval: `${CONFIG.SEND_INTERVAL / 1000}s`,
-      ratePerMinute: Math.round(60000 / CONFIG.SEND_INTERVAL),
-      antiDuplicate: `${CONFIG.ANTI_DUPLICATE_MS / 60000} phút`
-    }
-  });
-});
-
-// ============================================================
-// 🧪 API TEST
-// ============================================================
-app.get('/test', (req, res) => {
-  res.json({
-    message: '✅ Bot chấm công đang hoạt động!',
-    features: [
-      'Hệ thống hàng đợi thông minh',
-      `Gửi 1 tin mỗi ${CONFIG.SEND_INTERVAL / 1000}s`,
-      `Chống trùng cùng NV ${CONFIG.ANTI_DUPLICATE_MS / 60000} phút`,
-      'Tự động xử lý lỗi 429',
-      'Tự động thử lại khi lỗi'
-    ],
-    endpoints: {
-      status: '/status (Xem trạng thái hệ thống)',
-      webhook: 'POST /webhook/dahahi (Nhận dữ liệu chấm công)',
-      testSend: '/test-send (Gửi tin thử vào hàng đợi)'
-    }
-  });
-});
-
-// API gửi tin thử (để kiểm tra hàng đợi)
 app.get('/test-send', (req, res) => {
-  const testEmbed = buildEmbed('Nguyễn Văn Test', new Date().toLocaleString('vi-VN'), true, 'EMP00000999');
-  const queued = addToQueue(testEmbed);
-  res.json({ 
-    ok: true, 
-    message: queued ? '✅ Đã thêm vào hàng đợi!' : '❌ Hàng đợi đầy!',
-    queueLength: messageQueue.length
+  const embed = buildEmbed('Nguyễn Văn Test', new Date().toLocaleString('vi-VN'), true, 'TEST001');
+  addToQueue(embed);
+  res.json({ ok: true, message: 'Đã gửi tin thử — Kiểm tra Discord!' });
+});
+
+app.get('/status', (req, res) => {
+  res.json({
+    botReady: bot.isReady(),
+    queueLength: messageQueue.length,
+    processing: isProcessingQueue,
+    config: { sendInterval: CONFIG.SEND_INTERVAL + 'ms' }
   });
 });
 
 // ============================================================
-// 🚀 KHỞI ĐỘNG SERVER
+// 🚀 KHỞI ĐỘNG
 // ============================================================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log('\n' + '🚀'.repeat(20));
+  console.log('=========================================');
   console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
-  console.log(`⚙️ Cấu hình gửi: 1 tin mỗi ${CONFIG.SEND_INTERVAL / 1000}s → ${Math.round(60000 / CONFIG.SEND_INTERVAL)} tin/phút`);
-  console.log(`🛡️ Chống trùng: ${CONFIG.ANTI_DUPLICATE_MS / 60000} phút / nhân viên`);
-  console.log(`📦 Hàng đợi: Tối đa ${CONFIG.MAX_QUEUE_SIZE} tin`);
-  console.log(`🔒 Bảo vệ lỗi 429: TỐI ƯU HOÀN CHỈNH`);
-  console.log(`📊 Trạng thái: /status`);
-  console.log(`🧪 Test: /test`);
-  console.log('🚀'.repeat(20) + '\n');
+  console.log(`🤖 Chờ Bot kết nối...`);
+  console.log(`📡 Địa chỉ: https://dahahi-discord-bot.onrender.com`);
+  console.log('=========================================');
 });
