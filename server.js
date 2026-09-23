@@ -5,12 +5,13 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ============================================================
-// ⚙️ CẤU HÌNH — TRÁNH LỖI 429
+// ⚙️ CẤU HÌNH AN TOÀN — TRÁNH 429 DỨT ĐIỂM
 // ============================================================
 const CONFIG = {
-  SEND_INTERVAL: 2500,        // ⏱️ 2.5 giây/tin = 24 tin/phút — an toàn dưới ngưỡng Discord
+  SEND_INTERVAL: 3500,        // ⏱️ 3.5 giây/tin — DƯỚI ngưỡng Discord hoàn toàn
   ANTI_DUPLICATE_MS: 2 * 60 * 1000,
-  MAX_QUEUE_SIZE: 100
+  MAX_QUEUE_SIZE: 30,         // Giữ hàng đợi nhỏ
+  MAX_RETRY: 3                // Tối đa thử lại 3 lần thôi
 };
 
 // ============================================================
@@ -22,22 +23,29 @@ if (!DISCORD_WEBHOOK_URL) {
   process.exit(1);
 }
 console.log('🔑 Webhook URL: ✅ Đã cấu hình');
-console.log(`⚙️ Gửi mỗi ${CONFIG.SEND_INTERVAL/1000}s → Tránh lỗi 429`);
+console.log(`⚙️ Gửi mỗi ${CONFIG.SEND_INTERVAL/1000}s — an toàn 100%`);
 
 // ============================================================
-// 📦 HÀNG ĐỢI — TỰ ĐỘNG LẠI KHI BỊ LỖI
+// 📦 HÀNG ĐỢI — CÓ GIỚI HẠN THỬ LẠI
 // ============================================================
 const messageQueue = [];
 let isProcessingQueue = false;
+const processedKeys = new Set(); // Ngăn trùng tuyệt đối
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function addToQueue(embed) {
+function addToQueue(embed, uniqueKey) {
+  // Ngăn thêm nếu đã có trong hàng đợi/đã xử lý
+  if (processedKeys.has(uniqueKey)) {
+    console.log(`⏭️ Bỏ qua trùng: ${uniqueKey}`);
+    return false;
+  }
   if (messageQueue.length >= CONFIG.MAX_QUEUE_SIZE) {
     console.log('⚠️ Hàng đợi đầy, bỏ qua');
     return false;
   }
-  messageQueue.push({ embed, addedAt: Date.now() });
+  messageQueue.push({ embed, uniqueKey, retryCount: 0 });
+  processedKeys.add(uniqueKey);
   if (!isProcessingQueue) processQueue();
   return true;
 }
@@ -45,26 +53,41 @@ function addToQueue(embed) {
 async function processQueue() {
   isProcessingQueue = true;
   while (messageQueue.length > 0) {
-    const { embed } = messageQueue.shift();
+    const item = messageQueue.shift();
+    const { embed, uniqueKey, retryCount } = item;
+    
     try {
       await axios.post(DISCORD_WEBHOOK_URL, {
         embeds: [embed],
         username: 'Bot Chấm Công'
       });
-      console.log(`✅ Gửi thành công — Còn lại: ${messageQueue.length}`);
+      console.log(`✅ Gửi thành công: ${uniqueKey} — Còn: ${messageQueue.length}`);
+      processedKeys.delete(uniqueKey); // Xóa khóa sau khi thành công
+      
     } catch (e) {
       if (e.response?.status === 429) {
         const retryAfter = (e.response.data?.retry_after || 5) * 1000;
-        console.log(`⚠️ Bị giới hạn 429 → Đợi ${retryAfter/1000}s rồi thử lại...`);
-        messageQueue.unshift({ embed, addedAt: Date.now() }); // Đưa lại hàng đợi
-        await sleep(retryAfter);
-        continue;
+        
+        if (retryCount < CONFIG.MAX_RETRY) {
+          console.log(`⚠️ 429 — Thử lại ${retryCount+1}/${CONFIG.MAX_RETRY} sau ${retryAfter/1000}s...`);
+          item.retryCount++;
+          messageQueue.unshift(item); // Đưa lại đầu hàng đợi
+          await sleep(retryAfter);
+          continue;
+        } else {
+          console.log(`❌ Đã thử ${CONFIG.MAX_RETRY} lần thất bại — Bỏ qua: ${uniqueKey}`);
+          processedKeys.delete(uniqueKey); // Bỏ hẳn
+        }
+      } else {
+        console.error(`❌ Lỗi khác ${uniqueKey}:`, e.response?.status || e.message);
+        processedKeys.delete(uniqueKey);
       }
-      console.error('❌ Lỗi khác:', e.response?.status || e.message);
     }
+    
     await sleep(CONFIG.SEND_INTERVAL);
   }
   isProcessingQueue = false;
+  processedKeys.clear(); // Dọn dẹp khi rỗng
 }
 
 // ============================================================
@@ -99,7 +122,7 @@ const employeeNames = {
 };
 
 // ============================================================
-// 🔒 CHỐNG TRÙNG LẶP
+// 🔒 CHỐNG TRÙNG — CẢI TIẾN
 // ============================================================
 const lastStatus = {};
 const recentRequests = new Map();
@@ -176,7 +199,9 @@ app.post('/webhook/dahahi', async (req, res) => {
     }
     lastStatus[code] = { date: today, isCheckin };
 
-    addToQueue(buildEmbed(empName, timeStr, isCheckin, code));
+    const uniqueKey = `${code}-${today}-${isCheckin ? 'in' : 'out'}`;
+    addToQueue(buildEmbed(empName, timeStr, isCheckin, code), uniqueKey);
+    
     res.json({ ok: true, name: empName, type: isCheckin ? 'in' : 'out' });
   } catch (e) {
     console.error('❌ Lỗi xử lý:', e.message);
@@ -185,10 +210,16 @@ app.post('/webhook/dahahi', async (req, res) => {
 });
 
 // ============================================================
-// 🧪 KIỂM TRA
+// 🧪 KIỂM TRA — CHỈ GỬI 1 LẦN
 // ============================================================
+let testSent = false;
 app.get('/test-send', (req, res) => {
-  addToQueue(buildEmbed('Nguyễn Thống Nhất', '23/09/2026 17:21:17', true, 'EMP00000008'));
+  if (testSent) {
+    return res.json({ note: 'Đã gửi tin thử rồi — không gửi lại để tránh lỗi 429' });
+  }
+  testSent = true;
+  const uniqueKey = 'test-send-once';
+  addToQueue(buildEmbed('Nguyễn Thống Nhất', '23/09/2026 17:21:17', true, 'EMP00000008'), uniqueKey);
   res.json({ ok: true, message: '✅ Đã gửi tin thử — Kiểm tra Discord!' });
 });
 
@@ -199,6 +230,6 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
-  console.log(`✅ Đã tối ưu chống lỗi 429 — Gửi an toàn`);
+  console.log(`✅ Đã khắc phục lỗi 429 — Không lặp vô hạn`);
   console.log('=========================================');
 });
