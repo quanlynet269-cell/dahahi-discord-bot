@@ -5,10 +5,10 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ============================================================
-// ⚙️ CẤU HÌNH
+// ⚙️ CẤU HÌNH — TRÁNH LỖI 429
 // ============================================================
 const CONFIG = {
-  SEND_INTERVAL: 3000,
+  SEND_INTERVAL: 2500,        // ⏱️ 2.5 giây/tin = 24 tin/phút — an toàn dưới ngưỡng Discord
   ANTI_DUPLICATE_MS: 2 * 60 * 1000,
   MAX_QUEUE_SIZE: 100
 };
@@ -22,17 +22,19 @@ if (!DISCORD_WEBHOOK_URL) {
   process.exit(1);
 }
 console.log('🔑 Webhook URL: ✅ Đã cấu hình');
+console.log(`⚙️ Gửi mỗi ${CONFIG.SEND_INTERVAL/1000}s → Tránh lỗi 429`);
 
 // ============================================================
-// 📦 HÀNG ĐỢI
+// 📦 HÀNG ĐỢI — TỰ ĐỘNG LẠI KHI BỊ LỖI
 // ============================================================
 const messageQueue = [];
 let isProcessingQueue = false;
+
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function addToQueue(embed) {
   if (messageQueue.length >= CONFIG.MAX_QUEUE_SIZE) {
-    console.log('⚠️ Hàng đợi đầy');
+    console.log('⚠️ Hàng đợi đầy, bỏ qua');
     return false;
   }
   messageQueue.push({ embed, addedAt: Date.now() });
@@ -51,7 +53,14 @@ async function processQueue() {
       });
       console.log(`✅ Gửi thành công — Còn lại: ${messageQueue.length}`);
     } catch (e) {
-      console.error('❌ Lỗi gửi:', e.response?.status || e.message);
+      if (e.response?.status === 429) {
+        const retryAfter = (e.response.data?.retry_after || 5) * 1000;
+        console.log(`⚠️ Bị giới hạn 429 → Đợi ${retryAfter/1000}s rồi thử lại...`);
+        messageQueue.unshift({ embed, addedAt: Date.now() }); // Đưa lại hàng đợi
+        await sleep(retryAfter);
+        continue;
+      }
+      console.error('❌ Lỗi khác:', e.response?.status || e.message);
     }
     await sleep(CONFIG.SEND_INTERVAL);
   }
@@ -90,7 +99,7 @@ const employeeNames = {
 };
 
 // ============================================================
-// 🔒 CHỐNG TRÙNG
+// 🔒 CHỐNG TRÙNG LẶP
 // ============================================================
 const lastStatus = {};
 const recentRequests = new Map();
@@ -101,14 +110,16 @@ function getToday() {
 
 function isDuplicate(code) {
   if (recentRequests.has(code)) {
-    if (Date.now() - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) return true;
+    if (Date.now() - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) {
+      return true;
+    }
   }
   recentRequests.set(code, Date.now());
   return false;
 }
 
 // ============================================================
-// 🕐 ĐỊNH DẠNG THỜI GIAN — HÔM NAY LÚC 5:21 CH
+// 🕐 ĐỊNH DẠNG THỜI GIAN CHÂN TRANG
 // ============================================================
 function formatTimeFooter(date) {
   const h = date.getHours();
@@ -119,7 +130,7 @@ function formatTimeFooter(date) {
 }
 
 // ============================================================
-// 🎨 GIAO DIỆN MỚI — GIỐNG HỆT MẪU
+// 🎨 GIAO DIỆN ĐÚNG MẪU
 // ============================================================
 function buildEmbed(name, time, isCheckin, code) {
   const now = new Date();
@@ -131,23 +142,11 @@ function buildEmbed(name, time, isCheckin, code) {
   return {
     title: title,
     description: desc,
-    color: isCheckin ? 0x2ecc71 : 0xe67e22, // Xanh lá / Cam
+    color: isCheckin ? 0x2ecc71 : 0xe67e22,
     fields: [
-      {
-        name: '👤 Họ và tên',
-        value: name,
-        inline: true
-      },
-      {
-        name: '🆔 Mã nhân viên',
-        value: `\`${code}\``,
-        inline: true
-      },
-      {
-        name: '⏰ Thời gian',
-        value: time,
-        inline: true
-      }
+      { name: '👤 Họ và tên', value: name, inline: true },
+      { name: '🆔 Mã nhân viên', value: `\`${code}\``, inline: true },
+      { name: '⏰ Thời gian', value: time, inline: true }
     ],
     footer: {
       text: `Hệ thống chấm công DAHAHI • Tối ưu chống lỗi 429 • ${formatTimeFooter(now)}`
@@ -180,7 +179,7 @@ app.post('/webhook/dahahi', async (req, res) => {
     addToQueue(buildEmbed(empName, timeStr, isCheckin, code));
     res.json({ ok: true, name: empName, type: isCheckin ? 'in' : 'out' });
   } catch (e) {
-    console.error('❌ Lỗi:', e.message);
+    console.error('❌ Lỗi xử lý:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -200,6 +199,6 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
-  console.log(`✅ Giao diện mới đã cập nhật`);
+  console.log(`✅ Đã tối ưu chống lỗi 429 — Gửi an toàn`);
   console.log('=========================================');
 });
