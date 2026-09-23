@@ -8,7 +8,7 @@ app.use(express.json({ limit: '10mb' }));
 // ⚙️ CẤU HÌNH
 // ============================================================
 const CONFIG = {
-  SEND_INTERVAL: 3000,        // 3 giây/tin = 20 tin/phút — an toàn tuyệt đối
+  SEND_INTERVAL: 3000,
   ANTI_DUPLICATE_MS: 2 * 60 * 1000,
   MAX_QUEUE_SIZE: 100
 };
@@ -22,14 +22,12 @@ if (!DISCORD_WEBHOOK_URL) {
   process.exit(1);
 }
 console.log('🔑 Webhook URL: ✅ Đã cấu hình');
-console.log(`⚙️ Gửi 1 tin mỗi ${CONFIG.SEND_INTERVAL/1000}s → ${Math.round(60000/CONFIG.SEND_INTERVAL)} tin/phút`);
 
 // ============================================================
 // 📦 HÀNG ĐỢI
 // ============================================================
 const messageQueue = [];
 let isProcessingQueue = false;
-
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function addToQueue(embed) {
@@ -103,27 +101,58 @@ function getToday() {
 
 function isDuplicate(code) {
   if (recentRequests.has(code)) {
-    if (Date.now() - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) {
-      return true;
-    }
+    if (Date.now() - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) return true;
   }
   recentRequests.set(code, Date.now());
   return false;
 }
 
 // ============================================================
-// 🎨 TẠO TIN NHẮN
+// 🕐 ĐỊNH DẠNG THỜI GIAN — HÔM NAY LÚC 5:21 CH
+// ============================================================
+function formatTimeFooter(date) {
+  const h = date.getHours();
+  const m = String(date.getMinutes()).padStart(2, '0');
+  const period = h >= 12 ? 'CH' : 'SA';
+  const displayH = h > 12 ? h - 12 : h === 0 ? 12 : h;
+  return `Hôm nay lúc ${displayH}:${m} ${period}`;
+}
+
+// ============================================================
+// 🎨 GIAO DIỆN MỚI — GIỐNG HỆT MẪU
 // ============================================================
 function buildEmbed(name, time, isCheckin, code) {
+  const now = new Date();
+  const title = isCheckin ? '✅ NHÂN VIÊN VÀO CA' : '🏠 NHÂN VIÊN RA CA';
+  const desc = isCheckin
+    ? `**${name}** đã bắt đầu ca làm việc`
+    : `**${name}** đã kết thúc ca làm việc`;
+
   return {
-    title: isCheckin ? '✅ VÀO CA' : '👋 RA CA',
-    description: `**${name}**`,
-    color: isCheckin ? 5763719 : 15548997,
+    title: title,
+    description: desc,
+    color: isCheckin ? 0x2ecc71 : 0xe67e22, // Xanh lá / Cam
     fields: [
-      { name: '🆔 Mã NV', value: `\`${code}\``, inline: true },
-      { name: '⏰ Thời gian', value: time, inline: true }
+      {
+        name: '👤 Họ và tên',
+        value: name,
+        inline: true
+      },
+      {
+        name: '🆔 Mã nhân viên',
+        value: `\`${code}\``,
+        inline: true
+      },
+      {
+        name: '⏰ Thời gian',
+        value: time,
+        inline: true
+      }
     ],
-    timestamp: new Date().toISOString()
+    footer: {
+      text: `Hệ thống chấm công DAHAHI • Tối ưu chống lỗi 429 • ${formatTimeFooter(now)}`
+    },
+    timestamp: now.toISOString()
   };
 }
 
@@ -160,8 +189,8 @@ app.post('/webhook/dahahi', async (req, res) => {
 // 🧪 KIỂM TRA
 // ============================================================
 app.get('/test-send', (req, res) => {
-  addToQueue(buildEmbed('Nguyễn Văn Test', new Date().toLocaleString('vi-VN'), true, 'TEST001'));
-  res.json({ ok: true, message: 'Đã gửi tin thử → Kiểm tra Discord!' });
+  addToQueue(buildEmbed('Nguyễn Thống Nhất', '23/09/2026 17:21:17', true, 'EMP00000008'));
+  res.json({ ok: true, message: '✅ Đã gửi tin thử — Kiểm tra Discord!' });
 });
 
 // ============================================================
@@ -171,7 +200,6 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
-  console.log(`✅ Sử dụng Webhook — Không cần Bot kết nối!`);
-  console.log(`📡 Địa chỉ: https://dahahi-discord-bot.onrender.com`);
+  console.log(`✅ Giao diện mới đã cập nhật`);
   console.log('=========================================');
 });
