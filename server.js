@@ -25,7 +25,7 @@ if (!DISCORD_WEBHOOK_URL) {
 console.log('🔑 Webhook URL: ✅ Đã cấu hình');
 
 // ============================================================
-// 👥 DANH SÁCH NHÂN VIÊN
+// 👥 DANH SÁCH NHÂN VIÊN — ĐÃ KIỂM TRA LẠI TỪNG DÒNG
 // ============================================================
 const employeeNames = {
   'EMP00000003': 'Dương Nhất Vy',
@@ -56,15 +56,42 @@ const employeeNames = {
 };
 
 // ============================================================
-// 🔄 CHUẨN HÓA MÃ
+// 🔄 CHUẨN HÓA + TÌM TÊN — SỬA ĐỂ KHÔNG BỎ LỠ TRƯỜNG HỢP NÀO
 // ============================================================
 function normalizeEmployeeCode(code) {
   if (!code) return null;
-  let str = String(code).trim();
-  if (str.toUpperCase().startsWith('EMP')) {
-    return str.toUpperCase();
+  // Bỏ tất cả khoảng trắng, ký tự thừa → chuyển HOA
+  let str = String(code).trim().toUpperCase().replace(/\s+/g, '');
+  
+  // Đã có EMP → giữ nguyên
+  if (str.startsWith('EMP')) {
+    return str;
   }
+  
+  // Chỉ có số → thêm tiền tố
   return `EMP${str.padStart(8, '0')}`;
+}
+
+function findEmployeeName(normalizedCode) {
+  // Tìm chính xác
+  if (employeeNames[normalizedCode]) {
+    console.log(`✅ Tìm thấy tên: ${normalizedCode} → ${employeeNames[normalizedCode]}`);
+    return employeeNames[normalizedCode];
+  }
+  
+  // Thử tìm bằng phần số (phòng trường hợp định dạng khác)
+  const numPart = normalizedCode.replace(/^EMP/, '');
+  for (const [key, name] of Object.entries(employeeNames)) {
+    if (key.endsWith(numPart)) {
+      console.log(`✅ Tìm khớp số: ${normalizedCode} → ${key} → ${name}`);
+      return name;
+    }
+  }
+  
+  // Không tìm thấy → báo rõ
+  console.log(`❌ KHÔNG TÌM THẤY: ${normalizedCode}`);
+  console.log(`📋 Danh sách có: ${Object.keys(employeeNames).join(', ')}`);
+  return `Chưa cập nhật (${normalizedCode})`;
 }
 
 // ============================================================
@@ -102,26 +129,22 @@ async function processQueue() {
         embeds: [embed],
         username: 'Bot Chấm Công'
       });
-      console.log(`✅ Gửi thành công: ${uniqueKey} — Còn: ${messageQueue.length}`);
+      console.log(`✅ Gửi thành công: ${uniqueKey}`);
       processedKeys.delete(uniqueKey);
       
     } catch (e) {
       if (e.response?.status === 429) {
         const retryAfter = (e.response.data?.retry_after || 5) * 1000;
         if (retryCount < CONFIG.MAX_RETRY) {
-          console.log(`⚠️ 429 — Thử lại ${retryCount+1}/${CONFIG.MAX_RETRY} sau ${retryAfter/1000}s...`);
+          console.log(`⚠️ 429 — Thử lại sau ${retryAfter/1000}s...`);
           item.retryCount++;
           messageQueue.unshift(item);
           await sleep(retryAfter);
           continue;
-        } else {
-          console.log(`❌ Thất bại sau ${CONFIG.MAX_RETRY} lần: ${uniqueKey}`);
-          processedKeys.delete(uniqueKey);
         }
-      } else {
-        console.error(`❌ Lỗi ${uniqueKey}:`, e.response?.status || e.message);
-        processedKeys.delete(uniqueKey);
       }
+      console.error(`❌ Lỗi ${uniqueKey}:`, e.response?.status || e.message);
+      processedKeys.delete(uniqueKey);
     }
     await sleep(CONFIG.SEND_INTERVAL);
   }
@@ -166,9 +189,9 @@ function buildEmbed(name, time, isCheckin, code) {
 }
 
 // ============================================================
-// 📊 TRẠNG THÁI — THEO DÕI VÀO/RA CHÍNH XÁC
+// 📊 TRẠNG THÁI VÀO/RA CA
 // ============================================================
-const todayStatus = {}; // { [maNhanVien]: { lastAction: 'in'|'out', timeStamp: number } }
+const todayStatus = {};
 const recentRequests = new Map();
 
 function getToday() {
@@ -186,61 +209,50 @@ function isDuplicateCheck(code) {
   return false;
 }
 
-// Xác định vào ca hay ra ca DỰA TRẠNG THÁI TRƯỚC
 function determineCheckType(code) {
   const today = getToday();
   const key = `${today}-${code}`;
-  
   if (!todayStatus[key]) {
-    // Lần đầu trong ngày → VÀO CA
     todayStatus[key] = { lastAction: 'in', time: Date.now() };
-    return true; // isCheckin = true
+    return true;
   }
-  
-  // Đã có bản ghi → đảo ngược trạng thái
-  const prevAction = todayStatus[key].lastAction;
-  const nextAction = prevAction === 'in' ? 'out' : 'in';
+  const nextAction = todayStatus[key].lastAction === 'in' ? 'out' : 'in';
   todayStatus[key] = { lastAction: nextAction, time: Date.now() };
-  
   return nextAction === 'in';
 }
 
 // ============================================================
-// 📥 NHẬN DỮ LIỆU TỪ WEBHOOK
+// 📥 NHẬN DỮ LIỆU
 // ============================================================
 app.post('/webhook/dahahi', async (req, res) => {
   try {
     const p = req.body;
-    
-    // Lấy mã từ các trường có thể có
     const rawCode = p.EmployeeCode || p.FacePersonId || p.id || p.employee_id;
+    
     if (!rawCode) {
       console.log('❌ Dữ liệu nhận:', JSON.stringify(p, null, 2));
       return res.status(400).json({ error: 'Thiếu mã nhân viên' });
     }
     
     const normalizedCode = normalizeEmployeeCode(rawCode);
-    console.log(`📥 Nhận: mã gốc=${rawCode} → chuẩn hóa=${normalizedCode}`);
+    console.log(`📥 Mã gốc: [${rawCode}] → Chuẩn hóa: [${normalizedCode}]`);
     
     if (!normalizedCode) {
       return res.status(400).json({ error: 'Mã không hợp lệ' });
     }
     
-    // Chống trùng
     if (isDuplicateCheck(normalizedCode)) {
       return res.json({ note: 'Bỏ qua trùng lặp' });
     }
     
-    // Tìm tên
-    const empName = employeeNames[normalizedCode] || `Chưa cập nhật (${normalizedCode})`;
+    // Tìm tên — ĐÃ CẢI TIẾN
+    const empName = findEmployeeName(normalizedCode);
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
     
-    // Xác định VÀO CA hay RA CA
     const isCheckin = determineCheckType(normalizedCode);
     const today = getToday();
     const uniqueKey = `${normalizedCode}-${today}-${isCheckin ? 'in' : 'out'}`;
     
-    // Gửi thông báo
     addToQueue(buildEmbed(empName, timeStr, isCheckin, normalizedCode), uniqueKey);
     
     res.json({
@@ -250,7 +262,7 @@ app.post('/webhook/dahahi', async (req, res) => {
       type: isCheckin ? 'VÀO CA' : 'RA CA'
     });
   } catch (e) {
-    console.error('❌ Lỗi xử lý:', e.message);
+    console.error('❌ Lỗi:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -259,9 +271,10 @@ app.post('/webhook/dahahi', async (req, res) => {
 // 🧪 KIỂM TRA
 // ============================================================
 app.get('/test-send', (req, res) => {
-  const uniqueKey = 'test-send-' + Date.now();
-  addToQueue(buildEmbed('Lâm Phước Hội', '25/09/2026 17:17:18', true, 'EMP00000036'), uniqueKey);
-  res.json({ ok: true, message: '✅ Đã gửi tin thử VÀO CA — Kiểm tra Discord!' });
+  const uniqueKey = 'test-EMP00000010-' + Date.now();
+  const empName = findEmployeeName('EMP00000010');
+  addToQueue(buildEmbed(empName, '25/09/2026 19:03:21', true, 'EMP00000010'), uniqueKey);
+  res.json({ ok: true, message: '✅ Đã gửi tin thử EMP00000010', name: empName });
 });
 
 // ============================================================
@@ -271,7 +284,6 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
-  console.log(`✅ Đã sửa: Hiện tên NV + Phân biệt VÀO/RA CA`);
-  console.log(`✅ Chống lỗi 429 & chống trùng lặp`);
+  console.log(`✅ Đã sửa hiển thị tên — Kiểm tra log bên dưới`);
   console.log('=========================================');
 });
