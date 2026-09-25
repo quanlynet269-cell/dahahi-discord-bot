@@ -5,13 +5,13 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // ============================================================
-// ⚙️ CẤU HÌNH AN TOÀN — TRÁNH 429 DỨT ĐIỂM
+// ⚙️ CẤU HÌNH
 // ============================================================
 const CONFIG = {
-  SEND_INTERVAL: 3500,        // ⏱️ 3.5 giây/tin — DƯỚI ngưỡng Discord hoàn toàn
+  SEND_INTERVAL: 3500,
   ANTI_DUPLICATE_MS: 2 * 60 * 1000,
-  MAX_QUEUE_SIZE: 30,         // Giữ hàng đợi nhỏ
-  MAX_RETRY: 3                // Tối đa thử lại 3 lần thôi
+  MAX_QUEUE_SIZE: 30,
+  MAX_RETRY: 3
 };
 
 // ============================================================
@@ -23,72 +23,6 @@ if (!DISCORD_WEBHOOK_URL) {
   process.exit(1);
 }
 console.log('🔑 Webhook URL: ✅ Đã cấu hình');
-console.log(`⚙️ Gửi mỗi ${CONFIG.SEND_INTERVAL/1000}s — an toàn 100%`);
-
-// ============================================================
-// 📦 HÀNG ĐỢI — CÓ GIỚI HẠN THỬ LẠI
-// ============================================================
-const messageQueue = [];
-let isProcessingQueue = false;
-const processedKeys = new Set(); // Ngăn trùng tuyệt đối
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function addToQueue(embed, uniqueKey) {
-  // Ngăn thêm nếu đã có trong hàng đợi/đã xử lý
-  if (processedKeys.has(uniqueKey)) {
-    console.log(`⏭️ Bỏ qua trùng: ${uniqueKey}`);
-    return false;
-  }
-  if (messageQueue.length >= CONFIG.MAX_QUEUE_SIZE) {
-    console.log('⚠️ Hàng đợi đầy, bỏ qua');
-    return false;
-  }
-  messageQueue.push({ embed, uniqueKey, retryCount: 0 });
-  processedKeys.add(uniqueKey);
-  if (!isProcessingQueue) processQueue();
-  return true;
-}
-
-async function processQueue() {
-  isProcessingQueue = true;
-  while (messageQueue.length > 0) {
-    const item = messageQueue.shift();
-    const { embed, uniqueKey, retryCount } = item;
-    
-    try {
-      await axios.post(DISCORD_WEBHOOK_URL, {
-        embeds: [embed],
-        username: 'Bot Chấm Công'
-      });
-      console.log(`✅ Gửi thành công: ${uniqueKey} — Còn: ${messageQueue.length}`);
-      processedKeys.delete(uniqueKey); // Xóa khóa sau khi thành công
-      
-    } catch (e) {
-      if (e.response?.status === 429) {
-        const retryAfter = (e.response.data?.retry_after || 5) * 1000;
-        
-        if (retryCount < CONFIG.MAX_RETRY) {
-          console.log(`⚠️ 429 — Thử lại ${retryCount+1}/${CONFIG.MAX_RETRY} sau ${retryAfter/1000}s...`);
-          item.retryCount++;
-          messageQueue.unshift(item); // Đưa lại đầu hàng đợi
-          await sleep(retryAfter);
-          continue;
-        } else {
-          console.log(`❌ Đã thử ${CONFIG.MAX_RETRY} lần thất bại — Bỏ qua: ${uniqueKey}`);
-          processedKeys.delete(uniqueKey); // Bỏ hẳn
-        }
-      } else {
-        console.error(`❌ Lỗi khác ${uniqueKey}:`, e.response?.status || e.message);
-        processedKeys.delete(uniqueKey);
-      }
-    }
-    
-    await sleep(CONFIG.SEND_INTERVAL);
-  }
-  isProcessingQueue = false;
-  processedKeys.clear(); // Dọn dẹp khi rỗng
-}
 
 // ============================================================
 // 👥 DANH SÁCH NHÂN VIÊN
@@ -122,27 +56,80 @@ const employeeNames = {
 };
 
 // ============================================================
-// 🔒 CHỐNG TRÙNG — CẢI TIẾN
+// 🔄 CHUẨN HÓA MÃ
 // ============================================================
-const lastStatus = {};
-const recentRequests = new Map();
-
-function getToday() {
-  return new Date().toISOString().split('T')[0];
-}
-
-function isDuplicate(code) {
-  if (recentRequests.has(code)) {
-    if (Date.now() - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) {
-      return true;
-    }
+function normalizeEmployeeCode(code) {
+  if (!code) return null;
+  let str = String(code).trim();
+  if (str.toUpperCase().startsWith('EMP')) {
+    return str.toUpperCase();
   }
-  recentRequests.set(code, Date.now());
-  return false;
+  return `EMP${str.padStart(8, '0')}`;
 }
 
 // ============================================================
-// 🕐 ĐỊNH DẠNG THỜI GIAN CHÂN TRANG
+// 📦 HÀNG ĐỢI — CHỐNG 429
+// ============================================================
+const messageQueue = [];
+let isProcessingQueue = false;
+const processedKeys = new Set();
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function addToQueue(embed, uniqueKey) {
+  if (processedKeys.has(uniqueKey)) {
+    console.log(`⏭️ Bỏ qua trùng: ${uniqueKey}`);
+    return false;
+  }
+  if (messageQueue.length >= CONFIG.MAX_QUEUE_SIZE) {
+    console.log('⚠️ Hàng đợi đầy, bỏ qua');
+    return false;
+  }
+  messageQueue.push({ embed, uniqueKey, retryCount: 0 });
+  processedKeys.add(uniqueKey);
+  if (!isProcessingQueue) processQueue();
+  return true;
+}
+
+async function processQueue() {
+  isProcessingQueue = true;
+  while (messageQueue.length > 0) {
+    const item = messageQueue.shift();
+    const { embed, uniqueKey, retryCount } = item;
+    
+    try {
+      await axios.post(DISCORD_WEBHOOK_URL, {
+        embeds: [embed],
+        username: 'Bot Chấm Công'
+      });
+      console.log(`✅ Gửi thành công: ${uniqueKey} — Còn: ${messageQueue.length}`);
+      processedKeys.delete(uniqueKey);
+      
+    } catch (e) {
+      if (e.response?.status === 429) {
+        const retryAfter = (e.response.data?.retry_after || 5) * 1000;
+        if (retryCount < CONFIG.MAX_RETRY) {
+          console.log(`⚠️ 429 — Thử lại ${retryCount+1}/${CONFIG.MAX_RETRY} sau ${retryAfter/1000}s...`);
+          item.retryCount++;
+          messageQueue.unshift(item);
+          await sleep(retryAfter);
+          continue;
+        } else {
+          console.log(`❌ Thất bại sau ${CONFIG.MAX_RETRY} lần: ${uniqueKey}`);
+          processedKeys.delete(uniqueKey);
+        }
+      } else {
+        console.error(`❌ Lỗi ${uniqueKey}:`, e.response?.status || e.message);
+        processedKeys.delete(uniqueKey);
+      }
+    }
+    await sleep(CONFIG.SEND_INTERVAL);
+  }
+  isProcessingQueue = false;
+}
+
+// ============================================================
+// 🕐 ĐỊNH DẠNG THỜI GIAN
 // ============================================================
 function formatTimeFooter(date) {
   const h = date.getHours();
@@ -153,7 +140,7 @@ function formatTimeFooter(date) {
 }
 
 // ============================================================
-// 🎨 GIAO DIỆN ĐÚNG MẪU
+// 🎨 TẠO NỘI DUNG THÔNG BÁO
 // ============================================================
 function buildEmbed(name, time, isCheckin, code) {
   const now = new Date();
@@ -161,7 +148,7 @@ function buildEmbed(name, time, isCheckin, code) {
   const desc = isCheckin
     ? `**${name}** đã bắt đầu ca làm việc`
     : `**${name}** đã kết thúc ca làm việc`;
-
+  
   return {
     title: title,
     description: desc,
@@ -179,30 +166,89 @@ function buildEmbed(name, time, isCheckin, code) {
 }
 
 // ============================================================
-// 📥 API NHẬN DỮ LIỆU
+// 📊 TRẠNG THÁI — THEO DÕI VÀO/RA CHÍNH XÁC
+// ============================================================
+const todayStatus = {}; // { [maNhanVien]: { lastAction: 'in'|'out', timeStamp: number } }
+const recentRequests = new Map();
+
+function getToday() {
+  return new Date().toISOString().split('T')[0];
+}
+
+function isDuplicateCheck(code) {
+  const now = Date.now();
+  if (recentRequests.has(code)) {
+    if (now - recentRequests.get(code) < CONFIG.ANTI_DUPLICATE_MS) {
+      return true;
+    }
+  }
+  recentRequests.set(code, now);
+  return false;
+}
+
+// Xác định vào ca hay ra ca DỰA TRẠNG THÁI TRƯỚC
+function determineCheckType(code) {
+  const today = getToday();
+  const key = `${today}-${code}`;
+  
+  if (!todayStatus[key]) {
+    // Lần đầu trong ngày → VÀO CA
+    todayStatus[key] = { lastAction: 'in', time: Date.now() };
+    return true; // isCheckin = true
+  }
+  
+  // Đã có bản ghi → đảo ngược trạng thái
+  const prevAction = todayStatus[key].lastAction;
+  const nextAction = prevAction === 'in' ? 'out' : 'in';
+  todayStatus[key] = { lastAction: nextAction, time: Date.now() };
+  
+  return nextAction === 'in';
+}
+
+// ============================================================
+// 📥 NHẬN DỮ LIỆU TỪ WEBHOOK
 // ============================================================
 app.post('/webhook/dahahi', async (req, res) => {
   try {
     const p = req.body;
-    const code = p.EmployeeCode || p.FacePersonId;
-    const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
-
-    if (!code) return res.status(400).json({ error: 'Thiếu mã nhân viên' });
-    if (isDuplicate(code)) return res.json({ note: 'Bỏ qua trùng lặp' });
-
-    const empName = employeeNames[code] || code;
-    const today = getToday();
-    let isCheckin = true;
-
-    if (lastStatus[code] && lastStatus[code].date === today) {
-      isCheckin = !lastStatus[code].isCheckin;
-    }
-    lastStatus[code] = { date: today, isCheckin };
-
-    const uniqueKey = `${code}-${today}-${isCheckin ? 'in' : 'out'}`;
-    addToQueue(buildEmbed(empName, timeStr, isCheckin, code), uniqueKey);
     
-    res.json({ ok: true, name: empName, type: isCheckin ? 'in' : 'out' });
+    // Lấy mã từ các trường có thể có
+    const rawCode = p.EmployeeCode || p.FacePersonId || p.id || p.employee_id;
+    if (!rawCode) {
+      console.log('❌ Dữ liệu nhận:', JSON.stringify(p, null, 2));
+      return res.status(400).json({ error: 'Thiếu mã nhân viên' });
+    }
+    
+    const normalizedCode = normalizeEmployeeCode(rawCode);
+    console.log(`📥 Nhận: mã gốc=${rawCode} → chuẩn hóa=${normalizedCode}`);
+    
+    if (!normalizedCode) {
+      return res.status(400).json({ error: 'Mã không hợp lệ' });
+    }
+    
+    // Chống trùng
+    if (isDuplicateCheck(normalizedCode)) {
+      return res.json({ note: 'Bỏ qua trùng lặp' });
+    }
+    
+    // Tìm tên
+    const empName = employeeNames[normalizedCode] || `Chưa cập nhật (${normalizedCode})`;
+    const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
+    
+    // Xác định VÀO CA hay RA CA
+    const isCheckin = determineCheckType(normalizedCode);
+    const today = getToday();
+    const uniqueKey = `${normalizedCode}-${today}-${isCheckin ? 'in' : 'out'}`;
+    
+    // Gửi thông báo
+    addToQueue(buildEmbed(empName, timeStr, isCheckin, normalizedCode), uniqueKey);
+    
+    res.json({
+      ok: true,
+      name: empName,
+      code: normalizedCode,
+      type: isCheckin ? 'VÀO CA' : 'RA CA'
+    });
   } catch (e) {
     console.error('❌ Lỗi xử lý:', e.message);
     res.status(500).json({ error: e.message });
@@ -210,17 +256,12 @@ app.post('/webhook/dahahi', async (req, res) => {
 });
 
 // ============================================================
-// 🧪 KIỂM TRA — CHỈ GỬI 1 LẦN
+// 🧪 KIỂM TRA
 // ============================================================
-let testSent = false;
 app.get('/test-send', (req, res) => {
-  if (testSent) {
-    return res.json({ note: 'Đã gửi tin thử rồi — không gửi lại để tránh lỗi 429' });
-  }
-  testSent = true;
-  const uniqueKey = 'test-send-once';
-  addToQueue(buildEmbed('Nguyễn Thống Nhất', '23/09/2026 17:21:17', true, 'EMP00000008'), uniqueKey);
-  res.json({ ok: true, message: '✅ Đã gửi tin thử — Kiểm tra Discord!' });
+  const uniqueKey = 'test-send-' + Date.now();
+  addToQueue(buildEmbed('Lâm Phước Hội', '25/09/2026 17:17:18', true, 'EMP00000036'), uniqueKey);
+  res.json({ ok: true, message: '✅ Đã gửi tin thử VÀO CA — Kiểm tra Discord!' });
 });
 
 // ============================================================
@@ -230,6 +271,7 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
-  console.log(`✅ Đã khắc phục lỗi 429 — Không lặp vô hạn`);
+  console.log(`✅ Đã sửa: Hiện tên NV + Phân biệt VÀO/RA CA`);
+  console.log(`✅ Chống lỗi 429 & chống trùng lặp`);
   console.log('=========================================');
 });
