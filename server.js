@@ -8,10 +8,10 @@ app.use(express.json({ limit: '10mb' }));
 // ⚙️ CẤU HÌNH
 // ============================================================
 const CONFIG = {
-  SEND_INTERVAL: 3500,
-  ANTI_DUPLICATE_MS: 45 * 1000, // Chỉ chặn trùng 45s, đủ phân biệt vào/ra
-  MAX_QUEUE_SIZE: 30,
-  MAX_RETRY: 3
+  SEND_INTERVAL: 4000,         // ⏱️ 4 giây — an toàn tuyệt đối với Telegram
+  ANTI_DUPLICATE_MS: 90 * 1000, // Chặn 90 giây — đủ chắc chắn
+  MAX_QUEUE_SIZE: 10,
+  MAX_RETRY: 2                  // Giảm số lần thử lại
 };
 
 // ============================================================
@@ -59,7 +59,7 @@ const employeeNames = {
 };
 
 // ============================================================
-// 🔄 CHUẨN HÓA MÃ + TÌM TÊN
+// 🔄 CHUẨN HÓA MÃ
 // ============================================================
 function normalizeEmployeeCode(code) {
   if (!code) return null;
@@ -70,26 +70,21 @@ function normalizeEmployeeCode(code) {
 
 function findEmployeeName(normalizedCode) {
   if (employeeNames[normalizedCode]) {
-    console.log(`✅ Tìm thấy: ${normalizedCode} → ${employeeNames[normalizedCode]}`);
     return employeeNames[normalizedCode];
   }
   const numPart = normalizedCode.replace(/^EMP/, '');
   for (const [key, name] of Object.entries(employeeNames)) {
-    if (key.endsWith(numPart)) {
-      console.log(`✅ Khớp số: ${normalizedCode} → ${name}`);
-      return name;
-    }
+    if (key.endsWith(numPart)) return name;
   }
-  console.log(`⚠️ Chưa có tên: ${normalizedCode}`);
   return `Chưa cập nhật (${normalizedCode})`;
 }
 
 // ============================================================
-// 📦 HÀNG ĐỢI — SỬA LOGIC KHÓA ĐÚNG
+// 📦 HÀNG ĐỢI — SỬA CHẶN TRÙNG NGAY TỪ ĐẦU
 // ============================================================
 const messageQueue = [];
 let isProcessingQueue = false;
-const sentKeysToday = new Set(); // Giữ khóa ĐÃ GỬI trong ngày
+const sentKeysToday = new Set(); // Khóa đã gửi hôm nay
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -105,9 +100,9 @@ function getTodayKey() {
 }
 
 function addToQueue(telegramText, embed, uniqueKey) {
-  // === CHỐNG TRÙNG: Đã gửi hôm nay? ===
+  // === CHẶN NGAY: ĐÃ GỬI RỒI → BỎ QUA HOÀN TOÀN ===
   if (sentKeysToday.has(uniqueKey)) {
-    console.log(`⏭️ Bỏ qua ĐÃ GỬI: ${uniqueKey}`);
+    console.log(`🚫 ĐÃ GỬI RỒI, BỎ QUA: ${uniqueKey}`);
     return false;
   }
 
@@ -116,22 +111,23 @@ function addToQueue(telegramText, embed, uniqueKey) {
     return false;
   }
 
+  // Đánh dấu NGAY khi nhận — không chờ gửi xong
+  sentKeysToday.add(uniqueKey);
   messageQueue.push({ telegramText, embed, uniqueKey, retryCount: 0 });
-  sentKeysToday.add(uniqueKey); // Đánh dấu đã gửi
-  console.log(`📤 Đưa vào hàng đợi: ${uniqueKey}`);
+  console.log(`✅ Đưa vào hàng đợi: ${uniqueKey}`);
+  
   if (!isProcessingQueue) processQueue();
   return true;
 }
 
 async function sendTelegram(text) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  const res = await axios.post(url, {
+  return await axios.post(url, {
     chat_id: TELEGRAM_CHAT_ID,
     text: text,
     parse_mode: 'MarkdownV2',
     disable_web_page_preview: true
   });
-  return res.data;
 }
 
 async function sendDiscord(embed) {
@@ -144,17 +140,18 @@ async function sendDiscord(embed) {
 
 async function processQueue() {
   isProcessingQueue = true;
+  
   while (messageQueue.length > 0) {
     const item = messageQueue.shift();
     const { telegramText, embed, uniqueKey, retryCount } = item;
 
     try {
       await sendTelegram(telegramText);
-      console.log(`📱 Telegram ✅: ${uniqueKey}`);
+      console.log(`📱 Telegram ✅ GỬI XONG: ${uniqueKey}`);
 
       if (DISCORD_WEBHOOK_URL) {
         await sendDiscord(embed);
-        console.log(`💬 Discord ✅: ${uniqueKey}`);
+        console.log(`💬 Discord ✅ GỬI XONG: ${uniqueKey}`);
       }
 
     } catch (e) {
@@ -162,20 +159,21 @@ async function processQueue() {
       const retryAfter = (e.response?.data?.parameters?.retry_after || 5) * 1000;
 
       if (status === 429 && retryCount < CONFIG.MAX_RETRY) {
-        console.log(`⚠️ Telegram giới hạn — Thử lại sau ${retryAfter/1000}s...`);
+        console.log(`⚠️ Giới hạn, thử lại (${retryCount+1}/${CONFIG.MAX_RETRY}) sau ${retryAfter/1000}s...`);
         item.retryCount++;
         messageQueue.unshift(item);
         await sleep(retryAfter);
         continue;
       }
 
-      // Lỗi khác → xóa khóa để thử lại
+      // Thất bại cuối cùng → MỞ KHÓA để thử lại sau
       sentKeysToday.delete(uniqueKey);
-      console.error(`❌ Thất bại ${uniqueKey}:`, e.response?.data?.description || e.message);
+      console.error(`❌ Thất bại hoàn toàn ${uniqueKey}:`, e.response?.data?.description || e.message);
     }
 
     await sleep(CONFIG.SEND_INTERVAL);
   }
+
   isProcessingQueue = false;
 }
 
@@ -207,9 +205,7 @@ function buildMessages(name, time, isCheckin, code) {
 
   const embed = {
     title: isCheckin ? '✅ NHÂN VIÊN VÀO CA' : '🏠 NHÂN VIÊN RA CA',
-    description: isCheckin
-      ? `**${name}** đã bắt đầu ca làm việc`
-      : `**${name}** đã kết thúc ca làm việc`,
+    description: `**${name}** đã ${isCheckin ? 'bắt đầu' : 'kết thúc'} ca làm việc`,
     color: isCheckin ? 0x2ecc71 : 0xe67e22,
     fields: [
       { name: '👤 Họ và tên', value: name, inline: true },
@@ -224,89 +220,78 @@ function buildMessages(name, time, isCheckin, code) {
 }
 
 // ============================================================
-// 📊 TRẠNG THÁI VÀO/RA CA — ĐÃ SỬA CHẶT CHẼ
+// 📊 TRẠNG THÁI VÀO/RA CA
 // ============================================================
-const employeeState = {}; // { mã: { lastType: 'in'|'out', lastTime: số } }
+const employeeState = {};
 
 function getCurrentState(code) {
   const today = getTodayKey();
   if (!employeeState[code] || employeeState[code].date !== today) {
-    // Ngày mới → reset hoàn toàn
-    employeeState[code] = {
-      date: today,
-      lastType: null,
-      lastCheckTime: 0
-    };
+    employeeState[code] = { date: today, lastType: null, lastCheckTime: 0 };
   }
   return employeeState[code];
 }
 
 function determineCheckType(code) {
   const state = getCurrentState(code);
-  const now = Date.now();
-
   if (!state.lastType) {
-    // Lần đầu trong ngày → VÀO CA
     state.lastType = 'in';
-    state.lastCheckTime = now;
-    console.log(`🔄 ${code}: Lần đầu → VÀO CA`);
     return true;
   }
-
-  // Đã có → đảo ngược
   const nextIsIn = state.lastType === 'out';
   state.lastType = nextIsIn ? 'in' : 'out';
-  state.lastCheckTime = now;
-  console.log(`🔄 ${code}: Trước ${state.lastType === 'in' ? 'RA' : 'VÀO'} → ${nextIsIn ? 'VÀO' : 'RA'} CA`);
   return nextIsIn;
 }
 
 // ============================================================
-// 📥 NHẬN DỮ LIỆU TỪ CHẤM CÔNG — SỬA CHỐNG CHẶN QUÁ CHẶT
+// 📥 NHẬN DỮ LIỆU — CHẶN LIỀN TAY TẠI ĐẦU VÀO
 // ============================================================
-const quickCheckMap = new Map();
+const recentChecks = new Map();
 
 app.post('/webhook/dahahi', async (req, res) => {
   try {
     const p = req.body;
     const rawCode = p.EmployeeCode || p.FacePersonId || p.id || p.employee_id;
 
-    console.log('📥 DỮ LIỆU NHẬN:', JSON.stringify(p, null, 2)); // GHI LOG ĐỂ KIỂM TRA
+    console.log('📥 Nhận dữ liệu:', p.EmployeeCode || p.FacePersonId);
 
     if (!rawCode) {
       return res.status(400).json({ error: 'Thiếu mã nhân viên' });
     }
 
     const normalizedCode = normalizeEmployeeCode(rawCode);
-    console.log(`🔤 Mã gốc: [${rawCode}] → Chuẩn hóa: [${normalizedCode}]`);
-
     if (!normalizedCode) {
       return res.status(400).json({ error: 'Mã không hợp lệ' });
     }
 
-    // === CHỈ CHẶN GỌI LIÊN TỤC TRONG 45s CÙNG MÃ ===
+    // === CHẶN GỌI NHIỀU LẦN TRONG 90 GIÂY ===
     const nowMs = Date.now();
-    if (quickCheckMap.has(normalizedCode)) {
-      const gap = nowMs - quickCheckMap.get(normalizedCode);
+    if (recentChecks.has(normalizedCode)) {
+      const gap = nowMs - recentChecks.get(normalizedCode);
       if (gap < CONFIG.ANTI_DUPLICATE_MS) {
-        console.log(`⏭️ Bỏ qua chấm liên tục (${gap}ms): ${normalizedCode}`);
-        return res.json({ note: 'Đã chấm gần đây', gapMs: gap });
+        console.log(`🚫 Bỏ qua (${Math.round(gap/1000)}s < 90s): ${normalizedCode}`);
+        return res.json({ note: 'Đã chấm gần đây, bỏ qua' });
       }
     }
-    quickCheckMap.set(normalizedCode, nowMs);
+    recentChecks.set(normalizedCode, nowMs);
 
     // === XÁC ĐỊNH VÀO/RA ===
     const isCheckin = determineCheckType(normalizedCode);
     const today = getTodayKey();
     const uniqueKey = `${normalizedCode}-${today}-${isCheckin ? 'in' : 'out'}`;
 
-    // === LẤY TÊN ===
-    const empName = findEmployeeName(normalizedCode);
+    // === CHẶN TIẾP NỮA: ĐÃ GỬI THÌ DỪNG ===
+    if (sentKeysToday.has(uniqueKey)) {
+      console.log(`🚫 Đã gửi rồi, bỏ qua: ${uniqueKey}`);
+      return res.json({ note: 'Đã thông báo, không gửi lại' });
+    }
+
+    // === LẤY TÊN & TẠO NỘI DUNG ===
+    const empName = p.EmployeeName || findEmployeeName(normalizedCode);
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
-
-    // === TẠO NỘI DUNG ===
+    
     const { telegramText, embed } = buildMessages(empName, timeStr, isCheckin, normalizedCode);
-
+    
     // === GỬI ===
     const added = addToQueue(telegramText, embed, uniqueKey);
 
@@ -317,39 +302,19 @@ app.post('/webhook/dahahi', async (req, res) => {
       type: isCheckin ? 'VÀO CA' : 'RA CA',
       sent: added
     });
+
   } catch (e) {
-    console.error('❌ LỖI XỬ LÝ:', e.message);
+    console.error('❌ Lỗi:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
 // ============================================================
-// 🧪 KIỂM TRA THỬ
+// 🧪 KIỂM TRA
 // ============================================================
 app.get('/test-telegram', (req, res) => {
-  const code = 'EMP00000010';
-  const today = getTodayKey();
-
-  // Reset trạng thái để test được nhiều lần
-  employeeState[code] = { date: today, lastType: null, lastCheckTime: 0 };
-  sentKeysToday.clear(); // Xóa toàn bộ để test dễ
-
-  const isCheckin = determineCheckType(code);
-  const uniqueKey = `${code}-${today}-${isCheckin ? 'in' : 'out'}`;
-  const { telegramText, embed } = buildMessages(
-    'Trần An Nhật Minh',
-    new Date().toLocaleString('vi-VN'),
-    isCheckin,
-    code
-  );
-  const added = addToQueue(telegramText, embed, uniqueKey);
-
-  res.json({
-    ok: true,
-    message: '✅ Đã gửi — Kiểm tra Telegram',
-    type: isCheckin ? 'VÀO CA' : 'RA CA',
-    sent: added
-  });
+  sentKeysToday.clear();
+  res.json({ ok: true, message: '✅ Đã reset khóa chống trùng — chấm thử lại' });
 });
 
 // ============================================================
@@ -360,7 +325,7 @@ app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
   console.log(`🤖 Telegram: Đã kết nối`);
-  console.log(`🛡️ Chống trùng: Đã sửa — Vào/Ra phân biệt rõ`);
-  console.log(`📋 Log dữ liệu: Bật — xem nhận được gì`);
+  console.log(`🛡️ Chặn trùng: 90s + khóa ngay từ đầu`);
+  console.log(`⏱️ Gửi cách 4s — chống giới hạn 429`);
   console.log('=========================================');
 });
