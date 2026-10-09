@@ -16,20 +16,25 @@ const CONFIG = {
 };
 
 // ============================================================
-// 🔑 KIỂM TRA BIẾN MÔI TRƯỜNG
+// 🔑 KIỂM TRA BIẾN MÔI TRƯỜNG — IN RA ĐỂ XÁC NHẬN
 // ============================================================
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+console.log('=========================================');
+console.log('🔍 KIỂM TRA CẤU HÌNH:');
+console.log(`🤖 TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN ? '✅ Đã có' : '❌ Thiếu'}`);
+console.log(`💬 DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL ? '✅ Đã có' : '❌ Thiếu'}`);
+if (DISCORD_WEBHOOK_URL) {
+  console.log(`→ Định dạng: ${DISCORD_WEBHOOK_URL.startsWith('https://discord.com/api/webhooks/') ? '✅ Đúng' : '⚠️ Sai định dạng'}`);
+}
+console.log('=========================================\n');
+
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-  console.error('❌ Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID!');
+  console.error('❌ Thiếu thông tin Telegram!');
   process.exit(1);
 }
-console.log('🤖 Telegram: ✅ Đã cấu hình');
-console.log(DISCORD_WEBHOOK_URL 
-  ? '💬 Discord: ✅ Đã cấu hình Webhook' 
-  : '⚠️  Discord: KHÔNG có Webhook → chỉ gửi Telegram');
 
 // ============================================================
 // 👥 DANH SÁCH NHÂN VIÊN
@@ -91,158 +96,135 @@ const sentKeysToday = new Set();
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function getTodayKey() { return new Date().toISOString().split('T')[0]; }
 
-function addToQueue(telegramText, embed, uniqueKey) {
+function addToQueue(telegramText, discordPayload, uniqueKey) {
   if (sentKeysToday.has(uniqueKey)) {
-    console.log(`🚫 ĐÃ GỬI RỒI, BỎ QUA: ${uniqueKey}`);
+    console.log(`🚫 ĐÃ GỬI → BỎ QUA: ${uniqueKey}`);
     return false;
   }
   if (messageQueue.length >= CONFIG.MAX_QUEUE_SIZE) {
-    console.log('⚠️ Hàng đợi đầy, bỏ qua');
+    console.log('⚠️ Hàng đợi đầy');
     return false;
   }
   sentKeysToday.add(uniqueKey);
-  messageQueue.push({ telegramText, embed, uniqueKey, retryCount: 0 });
-  console.log(`✅ Đưa vào hàng đợi: ${uniqueKey} | Embed: ${embed ? 'CÓ' : 'KHÔNG'}`);
+  messageQueue.push({ telegramText, discordPayload, uniqueKey, retryCount: 0 });
+  console.log(`✅ ĐƯA VÀO HÀNG ĐỢI: ${uniqueKey}`);
   if (!isProcessingQueue) processQueue();
   return true;
 }
 
-// === GỬI TELEGRAM ===
+// ============================================================
+// 📤 GỬI TELEGRAM
+// ============================================================
 async function sendTelegram(text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  const res = await axios.post(url, {
-    chat_id: TELEGRAM_CHAT_ID,
-    text: text,
-    parse_mode: 'HTML',
-    disable_web_page_preview: true
-  }, { timeout: 15000 });
-  return res.data;
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    await axios.post(url, {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
+    }, { timeout: 15000 });
+    console.log('✅ Telegram: Đã gửi');
+    return true;
+  } catch (e) {
+    console.log('❌ Telegram lỗi:', e.response?.data?.description || e.message);
+    return false;
+  }
 }
 
-// === GỬI DISCORD — ĐÃ SỬA: đầy đủ + báo lỗi rõ ===
-async function sendDiscord(embed) {
+// ============================================================
+// 📤 GỬI DISCORD — ĐÃ SỬA: ĐỊNH DẠNG ĐÚNG + ĐỢI KẾT QUẢ
+// ============================================================
+async function sendDiscord(payload) {
   if (!DISCORD_WEBHOOK_URL) {
-    console.log('⏭️ Discord: Bỏ qua (chưa cấu hình)');
-    return { skipped: true };
-  }
-  if (!embed) {
-    console.log('❌ Discord: Bỏ qua — thiếu dữ liệu embed');
-    return { skipped: true };
+    console.log('⏭️ Discord: Bỏ qua — chưa cấu hình Webhook URL');
+    return false;
   }
 
-  // Đảm bảo luôn có title & màu
-  if (!embed.title) {
-    embed.title = embed.description?.includes('bắt đầu') 
-      ? '✅ NHÂN VIÊN VÀO CA' 
-      : '🏠 NHÂN VIÊN RA CA';
-  }
-  if (!embed.color) {
-    embed.color = embed.title.includes('VÀO') ? 0x2ecc71 : 0xe67e22;
-  }
+  console.log('📤 Đang gửi Discord...');
+  console.log('📋 Dữ liệu gửi:', JSON.stringify(payload, null, 2));
 
   try {
-    const res = await axios.post(DISCORD_WEBHOOK_URL, {
-      embeds: [embed],
-      username: 'Bot Chấm Công'
-    }, { timeout: 10000 });
-    console.log(`✅ Discord: Gửi thành công (HTTP ${res.status})`);
-    return { success: true };
+    const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
+      timeout: 15000,
+      headers: { 'Content-Type': 'application/json' }
+    });
+    console.log(`✅ Discord: GỬI THÀNH CÔNG (HTTP ${res.status}) → Kiểm tra kênh!`);
+    return true;
   } catch (e) {
-    console.log('❌ Discord lỗi:');
+    console.log('❌ Discord LỖI ===');
     if (e.response) {
-      console.log(`  → Mã: ${e.response.status}`);
-      console.log(`  → Chi tiết:`, e.response.data);
+      console.log(`→ Mã lỗi: ${e.response.status}`);
+      console.log(`→ Chi tiết:`, e.response.data);
+      if (e.response.status === 404) {
+        console.log(`→ 💡 Nguyên nhân: Webhook URL SAI hoặc ĐÃ BỊ XÓA`);
+      }
+      if (e.response.status === 401) {
+        console.log(`→ 💡 Nguyên nhân: Token Webhook KHÔNG HỢP LỆ`);
+      }
     } else {
-      console.log(`  → ${e.message}`);
+      console.log(`→ Lỗi: ${e.message}`);
     }
-    return { error: true };
+    console.log('==================');
+    return false;
   }
 }
 
-// === XỬ LÝ HÀNG ĐỢI ===
+// ============================================================
+// 🔄 XỬ LÝ HÀNG ĐỢI
+// ============================================================
 async function processQueue() {
   isProcessingQueue = true;
+  console.log('\n🔄 Bắt đầu xử lý hàng đợi...');
 
   while (messageQueue.length > 0) {
     const item = messageQueue.shift();
-    const { telegramText, embed, uniqueKey, retryCount } = item;
+    const { telegramText, discordPayload, uniqueKey } = item;
 
-    console.log(`\n🔍 XỬ LÝ: ${uniqueKey}`);
+    console.log(`\n━━━━━━ XỬ LÝ: ${uniqueKey} ━━━━━━`);
 
-    try {
-      // Gửi Telegram
-      await sendTelegram(telegramText);
-      console.log(`✅ Telegram: ${uniqueKey}`);
+    // Gửi song song
+    await Promise.all([
+      sendTelegram(telegramText),
+      sendDiscord(discordPayload)
+    ]);
 
-      // Gửi Discord
-      if (DISCORD_WEBHOOK_URL && embed && embed.title) {
-        await sendDiscord(embed);
-        console.log(`✅ Discord: ${uniqueKey}`);
-      } else {
-        console.log(`⏭️ Bỏ qua Discord: Webhook=${!!DISCORD_WEBHOOK_URL}, Embed=${!!embed}, Title=${!!embed?.title}`);
-      }
-
-    } catch (e) {
-      const status = e.response?.status;
-      const errMsg = e.response?.data?.description || e.message;
-
-      if (status === 429) {
-        const retryAfter = (e.response?.data?.parameters?.retry_after || CONFIG.RETRY_DELAY / 1000) * 1000;
-        console.log(`⚠️ Telegram giới hạn — chờ ${Math.round(retryAfter/1000)}s`);
-        
-        if (retryCount < CONFIG.MAX_RETRY) {
-          item.retryCount++;
-          messageQueue.unshift(item);
-          await sleep(retryAfter);
-          continue;
-        }
-        console.log(`❌ Đã thử ${CONFIG.MAX_RETRY+1} lần — bỏ qua: ${uniqueKey}`);
-      } else {
-        console.log(`❌ LỖI ${status}: ${errMsg}`);
-      }
-      sentKeysToday.delete(uniqueKey);
-    }
     await sleep(CONFIG.SEND_INTERVAL);
   }
+
   isProcessingQueue = false;
+  console.log('\n✅ Đã xử lý xong tất cả');
 }
 
 // ============================================================
-// 🕐 ĐỊNH DẠNG THỜI GIAN
-// ============================================================
-function formatTimeFooter(date) {
-  const h = date.getHours();
-  const m = String(date.getMinutes()).padStart(2, '0');
-  const period = h >= 12 ? 'CH' : 'SA';
-  const displayH = h > 12 ? h - 12 : h === 0 ? 12 : h;
-  return `${displayH}:${m} ${period}`;
-}
-
-// ============================================================
-// 🎨 TẠO NỘI DUNG — EMBED LUÔN ĐẦY ĐỦ
+// 🎨 TẠO NỘI DUNG — ĐÚNG ĐỊNH DẠNG DISCORD
 // ============================================================
 function buildMessages(name, time, isCheckin, code) {
   const now = new Date();
-  const timeFooter = formatTimeFooter(now);
-  
-  const telegramText = isCheckin
-    ? `<b>✅ NHÂN VIÊN VÀO CA</b>\n\n👤 Họ tên: <b>${name}</b>\n🆔 Mã: <code>${code}</code>\n⏰ Thời gian: ${time}\n\n<i>Hệ thống chấm công DAHAHI · ${timeFooter}</i>`
-    : `<b>🏠 NHÂN VIÊN RA CA</b>\n\n👤 Họ tên: <b>${name}</b>\n🆔 Mã: <code>${code}</code>\n⏰ Thời gian: ${time}\n\n<i>Hệ thống chấm công DAHAHI · ${timeFooter}</i>`;
+  const timeFooter = now.toLocaleString('vi-VN');
+  const typeText = isCheckin ? 'NHÂN VIÊN VÀO CA' : 'NHÂN VIÊN RA CA';
+  const colorCode = isCheckin ? 0x2ecc71 : 0xf59e0b;
 
-  const embed = {
-    title: isCheckin ? '✅ NHÂN VIÊN VÀO CA' : '🏠 NHÂN VIÊN RA CA',
-    description: `**${name}** đã ${isCheckin ? 'bắt đầu' : 'kết thúc'} ca làm việc`,
-    color: isCheckin ? 0x2ecc71 : 0xe67e22,
-    fields: [
-      { name: '👤 Họ và tên', value: name, inline: true },
-      { name: '🆔 Mã nhân viên', value: `\`${code}\``, inline: true },
-      { name: '⏰ Thời gian', value: time, inline: true }
-    ],
-    footer: { text: `Hệ thống chấm công DAHAHI · ${timeFooter}` },
-    timestamp: now.toISOString()
+  // Nội dung Telegram
+  const telegramText = `✅ <b>THÔNG BÁO CHẤM CÔNG TIỆM 15</b>\n<b>${typeText}</b>\n\n👤 Họ tên: ${name}\n🆔 Mã: <code>${code}</code>\n⏰ Thời gian: ${time}\n\n<i>Hệ thống chấm công DAHAHI · ${timeFooter}</i>`;
+
+  // Nội dung Discord — CÓ content + embeds = chắc chắn hiện
+  const discordPayload = {
+    content: `🔔 **${typeText}**`,
+    embeds: [{
+      title: `✅ ${typeText}`,
+      description: `**${name}**`,
+      color: colorCode,
+      fields: [
+        { name: '🆔 Mã nhân viên', value: `\`${code}\``, inline: true },
+        { name: '⏰ Thời gian', value: time, inline: true }
+      ],
+      footer: { text: `Hệ thống chấm công DAHAHI · ${timeFooter}` },
+      timestamp: now.toISOString()
+    }]
   };
 
-  return { telegramText, embed };
+  return { telegramText, discordPayload };
 }
 
 // ============================================================
@@ -278,7 +260,7 @@ app.post('/webhook/dahahi', async (req, res) => {
   try {
     const p = req.body;
     const rawCode = p.EmployeeCode || p.FacePersonId || p.id || p.employee_id;
-    console.log('📥 Nhận:', rawCode || 'KHÔNG CÓ MÃ');
+    console.log('\n📥 Nhận:', rawCode || 'KHÔNG CÓ MÃ');
 
     if (!rawCode) {
       return res.status(400).json({ error: 'Thiếu mã nhân viên' });
@@ -289,30 +271,30 @@ app.post('/webhook/dahahi', async (req, res) => {
       return res.status(400).json({ error: 'Mã không hợp lệ' });
     }
 
-    // Chặn gửi liên tục
+    // Chặn trùng
     const nowMs = Date.now();
     if (recentChecks.has(normalizedCode)) {
       const gap = nowMs - recentChecks.get(normalizedCode);
       if (gap < CONFIG.ANTI_DUPLICATE_MS) {
-        console.log(`🚫 Bỏ qua (${Math.round(gap/1000)}s < 90s): ${normalizedCode}`);
-        return res.json({ note: 'Đã chấm gần đây' });
+        console.log(`🚫 Bỏ qua trùng: ${normalizedCode} (cách ${Math.round(gap/1000)}s)`);
+        return res.json({ note: 'Đã nhận' });
       }
     }
     recentChecks.set(normalizedCode, nowMs);
 
     const isCheckin = determineCheckType(normalizedCode);
-    const today = getTodayKey();
-    const uniqueKey = `${normalizedCode}-${today}-${isCheckin ? 'in' : 'out'}`;
+    const uniqueKey = `${normalizedCode}-${getTodayKey()}-${isCheckin ? 'in' : 'out'}`;
 
     if (sentKeysToday.has(uniqueKey)) {
-      console.log(`🚫 Đã gửi trước đó: ${uniqueKey}`);
+      console.log(`🚫 Đã gửi trước đó → Bỏ qua: ${uniqueKey}`);
       return res.json({ note: 'Đã thông báo' });
     }
 
     const empName = p.EmployeeName || findEmployeeName(normalizedCode);
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
-    const { telegramText, embed } = buildMessages(empName, timeStr, isCheckin, normalizedCode);
-    const added = addToQueue(telegramText, embed, uniqueKey);
+    const { telegramText, discordPayload } = buildMessages(empName, timeStr, isCheckin, normalizedCode);
+    
+    const added = addToQueue(telegramText, discordPayload, uniqueKey);
 
     res.json({
       ok: true,
@@ -328,59 +310,38 @@ app.post('/webhook/dahahi', async (req, res) => {
 });
 
 // ============================================================
-// 🧪 TEST — CÓ DISCORD
+// 🧪 TEST — GỌI TRỰC TIẾP ĐỂ KIỂM TRA
 // ============================================================
-app.get('/test-telegram', (req, res) => {
-  const uniqueKey = `TEST-${Date.now()}`;
-  const timeNow = new Date().toLocaleString('vi-VN');
+app.get('/test-discord', async (req, res) => {
+  console.log('\n🧪 === Bắt đầu test Discord ===');
   
-  const telegramText = `✅ <b>KẾT NỐI BOT THÀNH CÔNG</b>\n\n🤖 Bot hoạt động ổn định\n⏰ Thời gian: ${timeNow}\n\n<i>Hệ thống chấm công DAHAHI</i>`;
-  
-  const testEmbed = {
-    title: '✅ KẾT NỐI BOT THÀNH CÔNG',
-    description: 'Bot đang hoạt động bình thường',
-    color: 0x2ecc71,
-    fields: [
-      { name: '⏰ Thời gian', value: timeNow, inline: true }
-    ],
-    footer: { text: 'Hệ thống chấm công DAHAHI' },
-    timestamp: new Date().toISOString()
+  if (!DISCORD_WEBHOOK_URL) {
+    return res.json({ error: 'Thiếu DISCORD_WEBHOOK_URL trong file .env' });
+  }
+
+  const testPayload = {
+    content: '🔔 **KIỂM TRA KẾT NỐI DISCORD**',
+    embeds: [{
+      title: '✅ KẾT NỐI THÀNH CÔNG',
+      description: 'Nếu bạn thấy tin này → Discord hoạt động bình thường!',
+      color: 0x2ecc71,
+      timestamp: new Date().toISOString()
+    }]
   };
+
+  const ok = await sendDiscord(testPayload);
   
-  messageQueue.push({ 
-    telegramText, 
-    embed: testEmbed,  // ✅ Đã sửa: không truyền rỗng
-    uniqueKey, 
-    retryCount: 0 
-  });
-  sentKeysToday.add(uniqueKey);
-  
-  if (!isProcessingQueue) processQueue();
-  
-  res.json({ 
-    ok: true, 
-    message: '✅ Đã gửi tin thử — Kiểm tra Telegram + Discord!',
-    note: DISCORD_WEBHOOK_URL ? 'Cả 2 kênh sẽ nhận được tin' : 'Chỉ có Telegram'
+  res.json({
+    success: ok,
+    message: ok ? '✅ Đã gửi → Kiểm tra kênh Discord!' : '❌ Xem log lỗi ở trên'
   });
 });
 
-// ============================================================
-// 🧪 TEST DISCORD RIÊNG — Thêm đường dẫn này
-// ============================================================
-app.get('/test-discord', (req, res) => {
-  if (!DISCORD_WEBHOOK_URL) {
-    return res.json({ error: 'Chưa cấu hình DISCORD_WEBHOOK_URL' });
-  }
-  
-  const testEmbed = {
-    title: '🔔 KIỂM TRA KẾT NỐI DISCORD',
-    description: 'Nếu bạn thấy tin này → Discord hoạt động bình thường ✅',
-    color: 0x2ecc71,
-    timestamp: new Date().toISOString()
-  };
-  
-  sendDiscord(testEmbed);
-  res.json({ success: true, message: 'Đã gửi tin kiểm tra Discord → Kiểm tra kênh!' });
+app.get('/test-telegram', async (req, res) => {
+  const timeNow = new Date().toLocaleString('vi-VN');
+  const testText = `✅ <b>KẾT NỐI THÀNH CÔNG</b>\n\n⏰ Thời gian: ${timeNow}`;
+  await sendTelegram(testText);
+  res.json({ success: true, message: 'Đã gửi tin Telegram' });
 });
 
 // ============================================================
@@ -389,12 +350,8 @@ app.get('/test-discord', (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
-  console.log(`🚀 SERVER ĐANG CHẠY CỔNG: ${PORT}`);
-  console.log(`🤖 Telegram: Đã kết nối — HTML ổn định`);
-  console.log(`💬 Discord: ${DISCORD_WEBHOOK_URL ? '✅ Đã bật' : '⚠️ Chưa cấu hình'}`);
-  console.log(`🛡️ Chống trùng: 90s + khóa ngay`);
-  console.log(`⏱️ Gửi cách 5s — chống 429`);
-  console.log(`🧪 Test Telegram: http://localhost:${PORT}/test-telegram`);
+  console.log(`🚀 Server: http://localhost:${PORT}`);
   console.log(`🧪 Test Discord:  http://localhost:${PORT}/test-discord`);
-  console.log('=========================================');
+  console.log(`🧪 Test Telegram: http://localhost:${PORT}/test-telegram`);
+  console.log('=========================================\n');
 });
