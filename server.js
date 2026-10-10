@@ -84,11 +84,18 @@ function findEmployeeName(normalizedCode) {
 }
 
 // ============================================================
-// 📤 GỬI TELEGRAM — ĐÃ TỐI ƯU: TẮT IPv6 + THỬ LẠI TỰ ĐỘNG
+// 📤 GỬI TELEGRAM — TỐI ƯU IPv4 + CHỐNG TRÙNG
 // ============================================================
 let lastSendTime = 0;
+let isSending = false; // Khóa chống gửi chồng chéo
 
 async function sendTelegram(text, attempt = 1) {
+  // Nếu đang gửi → chờ rồi bỏ qua
+  if (isSending) {
+    console.log('⏭️ Đang gửi → Bỏ qua yêu cầu trùng');
+    return { success: false, skipped: true };
+  }
+
   // Tự động chờ để không bị giới hạn tốc độ
   const now = Date.now();
   const timeSinceLast = now - lastSendTime;
@@ -96,12 +103,13 @@ async function sendTelegram(text, attempt = 1) {
     await sleep(CONFIG.SEND_INTERVAL - timeSinceLast);
   }
 
+  isSending = true;
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   
   // ✅ CHỈ DÙNG IPv4 — tránh lỗi ENETUNREACH / ETIMEDOUT
   const axiosConfig = {
-    timeout: 25000,    // Tăng lên 25 giây
-    family: 4,         // Buộc IPv4
+    timeout: 25000,
+    family: 4,
     headers: { 'Connection': 'keep-alive' }
   };
 
@@ -134,19 +142,24 @@ async function sendTelegram(text, attempt = 1) {
       console.log(`→ Chờ ${CONFIG.RETRY_DELAY/1000}s rồi thử lại...`);
       await sleep(CONFIG.RETRY_DELAY);
     }
-    // Hết số lần thử → báo thất bại
+
+    // Thử lại nếu chưa đủ số lần
     if (attempt <= CONFIG.MAX_RETRY) {
+      isSending = false;
       return sendTelegram(text, attempt + 1);
     }
 
     console.log(`❌ Telegram thất bại sau ${CONFIG.MAX_RETRY + 1} lần thử`);
     console.log(`💡 Nếu lặp lại nhiều → IP Render bị chặn → chạy trên máy dùng PM2`);
     return { error: true, status, message: errMsg };
+
+  } finally {
+    isSending = false; // Luôn mở khóa dù thành công hay thất bại
   }
 }
 
 // ============================================================
-// 🎨 TẠO NỘI DUNG THÔNG BÁO
+// 🎨 TẠO NỘI DUNG THÔNG BÁO CHẤM CÔNG
 // ============================================================
 function buildMessage(name, time, isCheckin, code) {
   const now = new Date();
@@ -247,12 +260,27 @@ app.post('/webhook/dahahi', async (req, res) => {
 });
 
 // ============================================================
-// 🧪 TEST KẾT NỐI TELEGRAM
+// 🧪 TEST THỦ CÔNG — Dùng UptimeRobot gọi mỗi 5 phút
 // ============================================================
+let lastTestSent = 0;
+const TEST_COOLDOWN = 5 * 60 * 1000; // Không gửi lại trong vòng 5 phút
+
 app.get('/test-telegram', async (req, res) => {
   console.log('\n🧪 === Test Telegram ===');
+  
+  // Chặn gửi trùng test liên tục
+  const now = Date.now();
+  if (now - lastTestSent < TEST_COOLDOWN) {
+    console.log('⏭️ Gửi test gần đây → Bỏ qua, chỉ giữ kết nối');
+    return res.json({
+      success: true,
+      message: '✅ Đã giữ kết nối — Bỏ qua gửi tin trùng'
+    });
+  }
+
+  lastTestSent = now;
   const timeNow = new Date().toLocaleString('vi-VN');
-  const testMsg = `✅ <b>KẾT NỐI BOT THÀNH CÔNG</b>\n\n🤖 Bot chỉ gửi Telegram — Hoạt động ổn định ✅\n⏰ Thời gian: ${timeNow}`;
+  const testMsg = `✅ <b>KẾT NỐI BOT THÀNH CÔNG</b>\n\n🤖 Bot đang hoạt động bình thường\n⏰ Thời gian: ${timeNow}`;
   
   const result = await sendTelegram(testMsg);
   
@@ -271,9 +299,9 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 Server chạy cổng: ${PORT}`);
-  console.log(`🤖 Chỉ gửi Telegram — Đã tắt Discord`);
-  console.log(`🛡️ Tối ưu: chỉ IPv4, thử lại tự động ${CONFIG.MAX_RETRY + 1} lần`);
-  console.log(`🧪 Test:     /test-telegram`);
+  console.log(`🤖 Chỉ gửi Telegram — Đã tắt tự gửi nội bộ`);
+  console.log(`🛡️ IPv4 + chống gửi trùng chồng chéo ✅`);
+  console.log(`🧪 Test:     /test-telegram (giữ kết nối, không gửi trùng)`);
   console.log(`📥 Webhook:  /webhook/dahahi`);
   console.log('=========================================\n');
 });
