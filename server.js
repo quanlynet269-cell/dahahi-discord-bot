@@ -9,7 +9,9 @@ app.use(express.json({ limit: '10mb' }));
 // ============================================================
 const CONFIG = {
   ANTI_DUPLICATE_MS: 90 * 1000, // Chặn gửi trùng trong 90 giây
-  SEND_INTERVAL: 3000           // Gửi cách 3 giây tránh bị giới hạn
+  SEND_INTERVAL: 3000,          // Gửi cách 3 giây tránh bị giới hạn
+  MAX_RETRY: 3,                 // Thử lại tối đa 3 lần
+  RETRY_DELAY: 5000             // Chờ 5 giây trước khi thử lại
 };
 
 // ============================================================
@@ -82,11 +84,11 @@ function findEmployeeName(normalizedCode) {
 }
 
 // ============================================================
-// 📤 GỬI TELEGRAM
+// 📤 GỬI TELEGRAM — ĐÃ TỐI ƯU: TẮT IPv6 + THỬ LẠI TỰ ĐỘNG
 // ============================================================
 let lastSendTime = 0;
 
-async function sendTelegram(text) {
+async function sendTelegram(text, attempt = 1) {
   // Tự động chờ để không bị giới hạn tốc độ
   const now = Date.now();
   const timeSinceLast = now - lastSendTime;
@@ -94,31 +96,51 @@ async function sendTelegram(text) {
     await sleep(CONFIG.SEND_INTERVAL - timeSinceLast);
   }
 
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  
+  // ✅ CHỈ DÙNG IPv4 — tránh lỗi ENETUNREACH / ETIMEDOUT
+  const axiosConfig = {
+    timeout: 25000,    // Tăng lên 25 giây
+    family: 4,         // Buộc IPv4
+    headers: { 'Connection': 'keep-alive' }
+  };
+
   try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     const res = await axios.post(url, {
       chat_id: TELEGRAM_CHAT_ID,
       text: text,
       parse_mode: 'HTML',
       disable_web_page_preview: true
-    }, { timeout: 15000 });
+    }, axiosConfig);
     
     lastSendTime = Date.now();
-    console.log('✅ Telegram: Đã gửi thành công');
+    console.log(`✅ Telegram: Đã gửi thành công (lần thử ${attempt})`);
     return { success: true };
+
   } catch (e) {
     const status = e.response?.status;
     const errMsg = e.response?.data?.description || e.message;
     
+    console.log(`⚠️ Telegram lần ${attempt}/${CONFIG.MAX_RETRY + 1} lỗi: ${errMsg}`);
+
+    // Giới hạn tốc độ → chờ theo yêu cầu Telegram
     if (status === 429) {
       const retryAfter = e.response?.data?.parameters?.retry_after || 5;
-      console.log(`⚠️ Telegram giới hạn tốc độ → chờ ${retryAfter}s`);
+      console.log(`→ Chờ ${retryAfter}s rồi thử lại...`);
       await sleep(retryAfter * 1000);
-      // Thử lại 1 lần
-      return sendTelegram(text);
     }
-    
-    console.log(`❌ Telegram lỗi ${status}: ${errMsg}`);
+    // Lỗi mạng/timeout → chờ mặc định
+    else if (attempt <= CONFIG.MAX_RETRY) {
+      console.log(`→ Chờ ${CONFIG.RETRY_DELAY/1000}s rồi thử lại...`);
+      await sleep(CONFIG.RETRY_DELAY);
+    }
+    // Hết số lần thử → báo thất bại
+    if (attempt <= CONFIG.MAX_RETRY) {
+      return sendTelegram(text, attempt + 1);
+    }
+
+    console.log(`❌ Telegram thất bại sau ${CONFIG.MAX_RETRY + 1} lần thử`);
+    console.log(`💡 Nếu lặp lại nhiều → IP Render bị chặn → chạy trên máy dùng PM2`);
     return { error: true, status, message: errMsg };
   }
 }
@@ -204,7 +226,6 @@ app.post('/webhook/dahahi', async (req, res) => {
     const empName = p.EmployeeName || findEmployeeName(normalizedCode);
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
     const message = buildMessage(empName, timeStr, isCheckin, normalizedCode);
-
     const result = await sendTelegram(message);
     
     if (result.success) {
@@ -251,6 +272,7 @@ app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 Server chạy cổng: ${PORT}`);
   console.log(`🤖 Chỉ gửi Telegram — Đã tắt Discord`);
+  console.log(`🛡️ Tối ưu: chỉ IPv4, thử lại tự động ${CONFIG.MAX_RETRY + 1} lần`);
   console.log(`🧪 Test:     /test-telegram`);
   console.log(`📥 Webhook:  /webhook/dahahi`);
   console.log('=========================================\n');
