@@ -84,19 +84,17 @@ function findEmployeeName(normalizedCode) {
 }
 
 // ============================================================
-// 📤 GỬI TELEGRAM — TỐI ƯU IPv4 + CHỐNG TRÙNG
+// 📤 GỬI TELEGRAM — CHỈ DÙNG CHO CHẤM CÔNG
 // ============================================================
 let lastSendTime = 0;
 let isSending = false; // Khóa chống gửi chồng chéo
 
 async function sendTelegram(text, attempt = 1) {
-  // Nếu đang gửi → chờ rồi bỏ qua
   if (isSending) {
     console.log('⏭️ Đang gửi → Bỏ qua yêu cầu trùng');
     return { success: false, skipped: true };
   }
 
-  // Tự động chờ để không bị giới hạn tốc độ
   const now = Date.now();
   const timeSinceLast = now - lastSendTime;
   if (timeSinceLast < CONFIG.SEND_INTERVAL) {
@@ -106,7 +104,7 @@ async function sendTelegram(text, attempt = 1) {
   isSending = true;
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   
-  // ✅ CHỈ DÙNG IPv4 — tránh lỗi ENETUNREACH / ETIMEDOUT
+  // ✅ Buộc dùng IPv4 — tránh lỗi kết nối
   const axiosConfig = {
     timeout: 25000,
     family: 4,
@@ -114,7 +112,7 @@ async function sendTelegram(text, attempt = 1) {
   };
 
   try {
-    const res = await axios.post(url, {
+    await axios.post(url, {
       chat_id: TELEGRAM_CHAT_ID,
       text: text,
       parse_mode: 'HTML',
@@ -122,39 +120,33 @@ async function sendTelegram(text, attempt = 1) {
     }, axiosConfig);
     
     lastSendTime = Date.now();
-    console.log(`✅ Telegram: Đã gửi thành công (lần thử ${attempt})`);
+    console.log(`✅ Đã gửi thành công (lần thử ${attempt})`);
     return { success: true };
 
   } catch (e) {
     const status = e.response?.status;
     const errMsg = e.response?.data?.description || e.message;
     
-    console.log(`⚠️ Telegram lần ${attempt}/${CONFIG.MAX_RETRY + 1} lỗi: ${errMsg}`);
+    console.log(`⚠️ Lỗi lần ${attempt}/${CONFIG.MAX_RETRY + 1}: ${errMsg}`);
 
-    // Giới hạn tốc độ → chờ theo yêu cầu Telegram
     if (status === 429) {
       const retryAfter = e.response?.data?.parameters?.retry_after || 5;
-      console.log(`→ Chờ ${retryAfter}s rồi thử lại...`);
       await sleep(retryAfter * 1000);
-    }
-    // Lỗi mạng/timeout → chờ mặc định
-    else if (attempt <= CONFIG.MAX_RETRY) {
-      console.log(`→ Chờ ${CONFIG.RETRY_DELAY/1000}s rồi thử lại...`);
+    } else if (attempt <= CONFIG.MAX_RETRY) {
       await sleep(CONFIG.RETRY_DELAY);
     }
 
-    // Thử lại nếu chưa đủ số lần
     if (attempt <= CONFIG.MAX_RETRY) {
       isSending = false;
       return sendTelegram(text, attempt + 1);
     }
 
-    console.log(`❌ Telegram thất bại sau ${CONFIG.MAX_RETRY + 1} lần thử`);
-    console.log(`💡 Nếu lặp lại nhiều → IP Render bị chặn → chạy trên máy dùng PM2`);
+    console.log(`❌ Thất bại sau ${CONFIG.MAX_RETRY + 1} lần thử`);
+    console.log(`💡 Nếu lặp lại → chạy trên máy dùng PM2`);
     return { error: true, status, message: errMsg };
 
   } finally {
-    isSending = false; // Luôn mở khóa dù thành công hay thất bại
+    isSending = false;
   }
 }
 
@@ -214,7 +206,6 @@ app.post('/webhook/dahahi', async (req, res) => {
       return res.status(400).json({ error: 'Mã không hợp lệ' });
     }
 
-    // Chặn gửi liên tục trong thời gian ngắn
     const nowMs = Date.now();
     if (recentChecks.has(normalizedCode)) {
       const gap = nowMs - recentChecks.get(normalizedCode);
@@ -225,17 +216,14 @@ app.post('/webhook/dahahi', async (req, res) => {
     }
     recentChecks.set(normalizedCode, nowMs);
 
-    // Xác định vào/ra ca
     const isCheckin = determineCheckType(normalizedCode);
     const uniqueKey = `${normalizedCode}-${getTodayKey()}-${isCheckin ? 'IN' : 'OUT'}`;
 
-    // Không gửi trùng cùng một lần trong ngày
     if (sentUniqueKeys.has(uniqueKey)) {
       console.log(`🚫 ĐÃ GỬI TRƯỚC → BỎ QUA: ${uniqueKey}`);
       return res.json({ note: 'Đã thông báo' });
     }
 
-    // Tạo nội dung & gửi
     const empName = p.EmployeeName || findEmployeeName(normalizedCode);
     const timeStr = p.CheckinTime || p.Time || new Date().toLocaleString('vi-VN');
     const message = buildMessage(empName, timeStr, isCheckin, normalizedCode);
@@ -260,35 +248,13 @@ app.post('/webhook/dahahi', async (req, res) => {
 });
 
 // ============================================================
-// 🧪 TEST THỦ CÔNG — Dùng UptimeRobot gọi mỗi 5 phút
+// 🧪 GIỮ KẾT NỐI — KHÔNG GỬI TIN TELEGRAM ⭐
 // ============================================================
-let lastTestSent = 0;
-const TEST_COOLDOWN = 5 * 60 * 1000; // Không gửi lại trong vòng 5 phút
-
-app.get('/test-telegram', async (req, res) => {
-  console.log('\n🧪 === Test Telegram ===');
-  
-  // Chặn gửi trùng test liên tục
-  const now = Date.now();
-  if (now - lastTestSent < TEST_COOLDOWN) {
-    console.log('⏭️ Gửi test gần đây → Bỏ qua, chỉ giữ kết nối');
-    return res.json({
-      success: true,
-      message: '✅ Đã giữ kết nối — Bỏ qua gửi tin trùng'
-    });
-  }
-
-  lastTestSent = now;
-  const timeNow = new Date().toLocaleString('vi-VN');
-  const testMsg = `✅ <b>KẾT NỐI BOT THÀNH CÔNG</b>\n\n🤖 Bot đang hoạt động bình thường\n⏰ Thời gian: ${timeNow}`;
-  
-  const result = await sendTelegram(testMsg);
-  
+app.get('/test-telegram', (req, res) => {
+  console.log('🔗 UptimeRobot ping → Giữ máy không ngủ (không gửi tin)');
   res.json({
-    success: result.success,
-    message: result.success 
-      ? '✅ Đã gửi → Kiểm tra Telegram!' 
-      : `❌ Thất bại: ${result.message}`
+    success: true,
+    message: '✅ Đang hoạt động — Giữ kết nối thành công'
   });
 });
 
@@ -299,9 +265,8 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log('=========================================');
   console.log(`🚀 Server chạy cổng: ${PORT}`);
-  console.log(`🤖 Chỉ gửi Telegram — Đã tắt tự gửi nội bộ`);
-  console.log(`🛡️ IPv4 + chống gửi trùng chồng chéo ✅`);
-  console.log(`🧪 Test:     /test-telegram (giữ kết nối, không gửi trùng)`);
-  console.log(`📥 Webhook:  /webhook/dahahi`);
+  console.log(`🤖 Chỉ gửi Telegram khi có chấm công`);
+  console.log(`🛡️ UptimeRobot giữ máy — KHÔNG gửi tin rác ✅`);
+  console.log(`📥 Webhook: /webhook/dahahi`);
   console.log('=========================================\n');
 });
